@@ -21,7 +21,7 @@ touchid-ssh-agent keeps the convenience of SSH keys and gets rid of the file:
 - **An inventory of your access.** Every server you authorize is listed, so you always know where your keys are installed.
 - **An encrypted backup in your cloud.** After every `authorize`, an encrypted copy of the inventory goes to a cloud-synced folder of your choice. Only your emergency kit can open it.
 - **An emergency kit for the day the Mac is gone.** A passphrase-protected key that you keep outside the Mac, already installed on every server.
-- **One-command recovery.** On a new Mac, `recover` uses the kit to open the inventory, installs the new Mac's keys on every server, removes the lost Mac's key and the used emergency key, and finishes with an audit. `recovery test` rehearses it without changing anything.
+- **One-command recovery.** On a new Mac, `recover` uses the kit to open the inventory, installs the new Mac's keys on every server, removes the lost Mac's key, replaces the emergency key if you choose to, and finishes with an audit. `recovery test` rehearses it without changing anything.
 - **ssh config included.** `authorize` offers to add a `Host` block, with a short name of your choice, so `ssh NAME` goes through Touch ID; `audit` checks that it is still there.
 - **Audits.** `audit` checks that every server in the inventory still has both keys.
 - **Standard OpenSSH, nothing to install on servers.** It works with the `ssh` and `git` you already use; servers only need public keys in `authorized_keys`.
@@ -160,12 +160,13 @@ touchid-ssh-agent recover ~/emergency-kit.txt
 
 `recover` does the rest, in this order:
 
-1. Opens the inventory with the kit. It finds `inventory.age` from the folder named in the kit, or asks where it is.
-2. Creates this Mac's Touch ID key, starts the agent, and creates a **new** emergency kit: the one you are using counts as exposed from now on.
-3. For each server, it logs in with the old emergency key and adds this Mac's keys. It checks the server's host key against the one in the inventory. Then it checks the Touch ID login (one Touch ID), and only then removes the lost Mac's key and the used emergency key. The keys it removes are matched by their exact fingerprints, so nothing else in `authorized_keys` is touched.
-4. Offers the `ssh` config blocks, writes the new inventory backup and runs `audit` (one more Touch ID per server).
+1. **Opens the kit.** It asks for the kit's passphrase twice, one right after the other, for security: age opens the inventory and ssh-add loads the emergency key. It finds `inventory.age` from the folder named in the kit, or asks where it is. The passphrase is not asked again after that.
+2. **Checks everything, changing nothing on the servers.** It creates this Mac's Touch ID key if needed, starts the agent, and logs in to every server with the emergency key.
+3. **Asks whether to replace the emergency key.** Replace it if anyone else may have seen the kit or its passphrase: you save a new kit with a new passphrase, and the old key is removed from every server. Keep it, and nothing new is created: the kit you used stays your emergency kit.
+4. **Moves the servers**, after you type `RECOVER`. For each server, it logs in with the emergency key and adds this Mac's keys, checking the server's host key against the one in the inventory. Then it checks the Touch ID login (one Touch ID), and only then removes the lost Mac's key (and the old emergency key, if you replaced it). The keys it removes are matched by their exact fingerprints, so nothing else in `authorized_keys` is touched.
+5. Offers the `ssh` config blocks, writes the new inventory backup and runs `audit` (one more Touch ID per server).
 
-For security, the passphrase is asked twice: once by age to open the inventory and once by ssh-add to load the emergency key. If a server fails, its old keys stay, the cloud backup is left as it was, and running `recover` again skips the servers already moved.
+If a server fails, its old keys stay, the cloud backup is left as it was, and running `recover` again skips the servers already moved.
 
 `touchid-ssh-agent recovery test emergency-kit.txt` checks, without changing anything, that the kit still opens every server. Run it now and then.
 
@@ -189,7 +190,7 @@ Then remove the lost Mac's login key from each server (`ssh-keygen -lf ~/.ssh/au
 | `set backup-path DIR\|none` | Sets or clears the backup folder for `inventory.age`. |
 | `recovery create [--replace] [--own-passphrase]` | Creates a new emergency kit. |
 | `recovery import FILE.pub [--replace]` / `recovery pubkey` | Uses an existing emergency key / prints the emergency public key. |
-| `recover KIT [--inventory FILE] [--keep-emergency-key]` | On a new Mac, moves every inventory server to this Mac, then audits. |
+| `recover KIT [--inventory FILE] [--keep-emergency-key]` | On a new Mac, moves every inventory server to this Mac, then audits. `--keep-emergency-key` answers Keep without asking. |
 | `recovery test KIT [--inventory FILE]` | Checks that the kit still opens every server. Changes nothing. |
 | `create [--comment T] [--biometry current-set\|any]` | Creates only the Touch ID key. Refuses if one already exists. |
 | `pubkey` / `fingerprint` | Prints the public key or its SHA256 fingerprint. |

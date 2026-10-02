@@ -246,10 +246,11 @@ public enum EmergencyKitBuilder {
              cd touchid-ssh-agent && make install
         2. Run it with this file:
              touchid-ssh-agent recover emergency-kit.txt
-           It opens the inventory, installs the new Mac's keys on every
-           server, removes the lost Mac's key and this emergency key, and
-           finishes with an audit. For security it asks for the passphrase
-           twice: once to open the inventory, once to load this key.
+           For security it asks for the passphrase twice, one right after
+           the other: once to open the inventory, once to load this key.
+           It checks every server, asks whether to replace this emergency
+           key, installs the new Mac's keys, removes the lost Mac's key,
+           and finishes with an audit.
 
         On any other computer, with OpenSSH and age (https://age-encryption.org):
         1. Save this file as emergency-kit.txt and run:

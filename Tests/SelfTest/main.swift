@@ -1172,6 +1172,7 @@ if runDocker {
           "or Enter to skip" { send -- "\r"; exp_continue }
           "Add it to" { send -- "y\r"; exp_continue }
           "Add them?" { send -- "n\r"; exp_continue }
+          "Replace the emergency key" { puts "\nRESULT=asked-to-replace"; exit 5 }
           timeout { puts "\nRESULT=hung"; exit 3 }
           eof
         }
@@ -1237,7 +1238,7 @@ if runDocker {
         defer { probe.stop() }
         let result = try runRecovery("recovery test", on: probe)
         check(result.stdout.contains("EXIT=0") && result.stdout.contains("opens every server"), "dry run: \(result.stdout.suffix(500))")
-        check(result.stdout.contains("asked for your emergency passphrase twice"), "warns about the two prompts")
+        check(result.stdout.contains("this kit's passphrase twice"), "warns about the two prompts")
         check(try onRecServer("cat $HOME/.ssh/authorized_keys") == before, "authorized_keys unchanged")
         check(!FileManager.default.fileExists(atPath: newKnownHosts.path), "this Mac's known_hosts untouched")
     }
@@ -1320,6 +1321,109 @@ if runDocker {
         check(blobs.contains(newer.identity.publicKeyBlob), "newer Mac's key installed")
         check(kitKey.map { blobs.contains($0.blob) } == true, "kept emergency key still on the server")
         check(!blobs.contains { SSHKeyFormat.fingerprint(blob: $0) == previousFingerprint }, "previous Mac's key removed")
+    }
+
+    // The previous test kept "new-emergency", so its plain kit still opens everything.
+    let plainKitFile = work.appendingPathComponent("new-emergency-kit.txt")
+    let plainKitKey = try? RecoveryKey(line: try String(contentsOf: work.appendingPathComponent("new-emergency.pub"), encoding: .utf8))
+
+    test("recover: answering Keep moves the servers without a new kit") {
+        let keeper = try LiveAgent.start()
+        defer { keeper.stop() }
+        try SettingsStore.save(AgentSettings(backupPath: recCloud.path), to: keeper.paths)
+        let result = try expectScript(#"""
+        set timeout 180
+        spawn $env(CLI) recover $env(KIT) --inventory $env(INV) -F $env(CFG)
+        expect {
+          "Replace the emergency key" { send -- "n\r"; exp_continue }
+          "Type RECOVER" { send -- "RECOVER\r"; exp_continue }
+          "or Enter to skip" { send -- "\r"; exp_continue }
+          "Add it to" { send -- "n\r"; exp_continue }
+          "Add them?" { send -- "n\r"; exp_continue }
+          "Retype the passphrase" { puts "\nRESULT=asked-for-new-kit"; exit 4 }
+          timeout { puts "\nRESULT=hung"; exit 3 }
+          eof
+        }
+        catch wait result
+        puts "\nEXIT=[lindex $result 3]"
+        """#, paths: keeper.paths, extra: ["KIT": plainKitFile.path, "INV": recBackup.path, "CFG": newConfig.path], in: work)
+        check(result.stdout.contains("EXIT=0"), "recover succeeded: \(result.stdout.suffix(600))")
+        let output = result.stdout
+        if let checked = output.range(of: "Logging in with the emergency key only"), let asked = output.range(of: "Replace the emergency key") {
+            check(checked.lowerBound < asked.lowerBound, "every server is checked before the question")
+        } else {
+            check(false, "checks and question shown")
+        }
+        check(output.contains("Keep the emergency kit you used"), "tells the user the kit stays valid")
+        check(try RecoveryStore.load(from: keeper.paths)?.blob == plainKitKey?.blob, "the kit's key is this Mac's emergency key")
+        let blobs = try recServerBlobs()
+        check(blobs.contains(keeper.identity.publicKeyBlob), "this Mac's key installed")
+        check(plainKitKey.map { blobs.contains($0.blob) } == true, "kept emergency key still on the server")
+    }
+
+    test("recover: answering Replace asks the old passphrase first, then saves a new kit and retires the old one") {
+        let replacer = try LiveAgent.start()
+        defer { replacer.stop() }
+        try SettingsStore.save(AgentSettings(backupPath: recCloud.path), to: replacer.paths)
+        let savedKit = work.appendingPathComponent("replaced-kit.txt")
+        let result = try expectScript(#"""
+        set timeout 180
+        spawn $env(CLI) recover $env(KIT) --inventory $env(INV) -F $env(CFG)
+        expect {
+          "Replace the emergency key" { send -- "\r" }
+          timeout { puts "\nRESULT=hung"; exit 3 }
+        }
+        """# + "\n" + confirmPassphrase + #"""
+
+        expect "Type SAVED"
+        exec cp $env(NEWKIT) $env(COPY)
+        send -- "SAVED\r"
+        expect {
+          "Type RECOVER" { send -- "RECOVER\r"; exp_continue }
+          "or Enter to skip" { send -- "\r"; exp_continue }
+          "Add it to" { send -- "n\r"; exp_continue }
+          "Add them?" { send -- "n\r"; exp_continue }
+          timeout { puts "\nRESULT=hung"; exit 3 }
+          eof
+        }
+        catch wait result
+        puts "\nEXIT=[lindex $result 3]"
+        puts "PASS=$pass"
+        """#, paths: replacer.paths, extra: [
+            "KIT": plainKitFile.path, "INV": recBackup.path, "CFG": newConfig.path, "COPY": savedKit.path,
+            "NEWKIT": replacer.paths.kitDirectory.appendingPathComponent(EmergencyKitBuilder.kitFileName).path,
+        ], in: work)
+        let output = result.stdout
+        check(output.contains("EXIT=0"), "recover succeeded: \(output.suffix(800))")
+        if let loaded = output.range(of: "Emergency key loaded"), let shown = output.range(of: "shown only this once") {
+            check(loaded.lowerBound < shown.lowerBound, "the old kit is loaded before the new passphrase is shown")
+        } else {
+            check(false, "old kit loaded and new passphrase shown")
+        }
+        check(output.contains("for the NEW kit"), "says which kit the new passphrase belongs to")
+        check(output.contains("you can destroy it"), "old kit retired")
+
+        let newKey = try RecoveryStore.load(from: replacer.paths)
+        check(newKey != nil && newKey?.blob != plainKitKey?.blob, "a new emergency key is configured")
+        let passphrase = output.components(separatedBy: "PASS=").last?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if let newKey {
+            check((try? EmergencyKitBuilder.verify(kitFile: savedKit, passphrase: passphrase, expected: newKey)) != nil,
+                  "the saved kit opens with the new passphrase")
+        }
+        let blobs = try recServerBlobs()
+        check(blobs.contains(replacer.identity.publicKeyBlob) && newKey.map { blobs.contains($0.blob) } == true, "new keys installed")
+        check(plainKitKey.map { !blobs.contains($0.blob) } == true, "old emergency key removed")
+
+        let oldOpens = try run(agePath ?? "age", ["-d", "-i", plainKitFile.path, recBackup.path])
+        check(oldOpens.status != 0, "the old kit no longer opens the backup")
+        let opened = try expectScript(#"""
+        spawn $env(AGE) -d -i $env(NEWKIT) $env(INV)
+        expect "passphrase"
+        send -- "$env(PASS)\r"
+        expect eof
+        """#, paths: replacer.paths, extra: ["AGE": agePath ?? "age", "NEWKIT": savedKit.path, "INV": recBackup.path,
+                                             "PASS": passphrase], in: work)
+        check(opened.stdout.contains(replacer.identity.fingerprint), "the new kit opens the new backup")
     }
 } else {
     print("(real Docker login skipped; use --docker)")
