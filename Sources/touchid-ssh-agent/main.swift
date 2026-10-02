@@ -24,6 +24,11 @@ Usage:
         Creates a new emergency kit (passphrase-protected key, kept off this Mac).
   \(tool) recovery import FILE.pub [--replace]
         Uses an emergency key you already have; only its public key is copied.
+  \(tool) recovery test emergency-kit.txt [--inventory FILE]
+        Checks that the emergency kit still logs in to every server. Changes nothing.
+  \(tool) recover emergency-kit.txt [--inventory FILE] [--keep-emergency-key]
+        On a new Mac: opens the inventory with the kit, installs this Mac's keys on
+        every server, removes the lost Mac's key, then audits.
   \(tool) recovery pubkey Prints the emergency public key.
   \(tool) create [--comment TEXT] [--biometry current-set|any]
         Creates only the Touch ID key. Default: current-set (adding or removing
@@ -294,6 +299,7 @@ do {
     case "setup": try setup(rest, paths: paths)
     case "authorize": try authorize(rest, paths: paths)
     case "audit": try audit(rest, paths: paths)
+    case "recover": try recover(rest, paths: paths, dryRun: false)
     case "inventory": try listInventory(paths: paths)
     case "recovery": try recovery(rest, paths: paths)
     case "set":

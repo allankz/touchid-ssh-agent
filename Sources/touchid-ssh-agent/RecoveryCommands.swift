@@ -195,13 +195,15 @@ func recovery(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
     case "import":
         guard positional.count == 1 else { throw UsageError(description: "usage: \(tool) recovery import FILE.pub [--replace]") }
         try importEmergencyKey(positional[0], paths: paths, replace: options["replace"] != nil)
+    case "test":
+        try recover(arguments.dropFirst(), paths: paths, dryRun: true)
     case "pubkey":
         guard let key = try RecoveryStore.load(from: paths) else {
             throw UsageError(description: "no emergency key yet. Run `\(tool) setup`.")
         }
         print(key.line)
     default:
-        throw UsageError(description: "usage: \(tool) recovery create|import|pubkey")
+        throw UsageError(description: "usage: \(tool) recovery create|import|test|pubkey")
     }
 }
 
@@ -348,7 +350,7 @@ func authorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
       emergency key  \(recoveryKey.fingerprint)
     """)
 
-    Out.section("1/3 Adding the keys (with your current access to the server)")
+    Out.section("1/4 Adding the keys (with your current access to the server)")
     let report: [String: Bool]
     do {
         report = try RemoteKeys.install(keys, on: target)
@@ -366,25 +368,114 @@ func authorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
         Out.say("  \(key.label == "login" ? "Touch ID key " : "emergency key"): \(report[key.label] == true ? "added" : "already there")")
     }
 
-    Out.section("2/3 Checking the Touch ID key (approve the Touch ID prompt)")
+    Out.section("2/4 Checking the Touch ID key (approve the Touch ID prompt)")
     let check = RemoteKeys.verifyLogin(on: SSHTarget(destination: destination, port: port, configFile: configFile),
                                        paths: paths, identity: identity)
     Out.say("  \(describe(check))")
 
-    Out.section("3/3 Updating the inventory")
+    Out.section("3/4 ssh config")
+    let friendlyName = try offerSSHConfig(destination: destination, suggestedName: alias, resolved: resolved,
+                                          configFile: configFile, paths: paths)
+
+    Out.section("4/4 Updating the inventory")
+    let entryAlias = friendlyName ?? alias ?? destination
     var inventory = try InventoryStore.load(from: paths)
     inventory.mac = IdentityStore.defaultComment()
+    // One entry per server: drop older entries for the same user, host and port.
+    inventory.servers.removeAll {
+        $0.hostname == resolved.hostname && $0.port == resolved.port && $0.user == resolved.user && $0.alias != entryAlias
+    }
     inventory.upsert(InventoryEntry(
-        alias: alias ?? destination, destination: destination,
+        alias: entryAlias, destination: friendlyName ?? destination,
         hostname: resolved.hostname, user: resolved.user, port: resolved.port, sshConfigFile: configFile,
         loginKeyFingerprint: identity.fingerprint, recoveryKeyFingerprint: recoveryKey.fingerprint,
-        authorizedAt: .wholeSecondsNow
+        authorizedAt: .wholeSecondsNow, hostKeys: HostKeys.known(for: resolved)
     ))
     try InventoryStore.save(inventory, to: paths)
-    Out.say("  \(alias ?? destination) saved (\(inventory.servers.count) server\(inventory.servers.count == 1 ? "" : "s") in the inventory).")
+    Out.say("  \(entryAlias) saved (\(inventory.servers.count) server\(inventory.servers.count == 1 ? "" : "s") in the inventory).")
     reportBackup(InventoryBackup.export(paths: paths), paths: paths)
 
     guard check == .ok else { exit(1) }
+}
+
+/// Step 3 of authorize: make `ssh NAME` use the Touch ID agent. Returns a new
+/// friendly name when one was added, so the inventory records it.
+func offerSSHConfig(destination: String, suggestedName: String?, resolved: ResolvedTarget,
+                    configFile: String?, paths: AgentPaths) throws -> String? {
+    let file = SSHConfigFile.forTarget(configFile: configFile)
+    let shown = paths.displayPath(file.url)
+    let hostPart = destination.split(separator: "@").last.map(String.init) ?? destination
+    let aliases = file.hostAliases()
+    if resolved.usesTouchIDAgent(paths) {
+        Out.say("  ✓ `ssh \(destination)` already uses the Touch ID agent.")
+        return nil
+    }
+    let block = { (name: String) in
+        SSHConfigFile.block(alias: name, hostname: resolved.hostname, user: resolved.user,
+                            port: resolved.port == 22 ? nil : resolved.port, paths: paths)
+    }
+    let indented = { (text: String) in text.split(separator: "\n").map { "    " + $0 }.joined(separator: "\n") }
+    guard Terminal.isInteractive else {
+        Out.say("  To log in with `ssh NAME` through the Touch ID agent, add this to \(shown):\n")
+        Out.say(indented(block(suggestedName ?? "NAME")))
+        return nil
+    }
+
+    if aliases.contains(hostPart), !destination.contains("@") {
+        Out.say("  Host \(hostPart) in \(shown) does not use the Touch ID agent yet.")
+        Out.say("  These lines would be added to it:\n")
+        Out.say(indented(SSHConfigFile.agentLines(paths: paths).joined(separator: "\n")))
+        guard Terminal.ask("Add them? [y/N]: ")?.lowercased().hasPrefix("y") == true else {
+            Out.say("  Left unchanged.")
+            return nil
+        }
+        let backup = try file.insertAgentLines(intoHost: hostPart, paths: paths)
+        Out.say("  ✓ Updated Host \(hostPart) (previous version saved as \(paths.displayPath(backup))).")
+        return nil
+    }
+
+    Out.say("  Give this server a short name, to log in with `ssh NAME`.")
+    while true {
+        let hint = suggestedName.map { " [\($0)]" } ?? ""
+        guard let answer = Terminal.ask("Name\(hint), or Enter to skip: ") else { return nil }
+        let typed = answer.trimmingCharacters(in: .whitespaces)
+        let name = typed.isEmpty ? (suggestedName ?? "") : typed
+        if name.isEmpty {
+            Out.say("  Skipped.")
+            return nil
+        }
+        guard name.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil else {
+            Out.say("  Use letters, digits, dots, dashes or underscores.")
+            continue
+        }
+        guard !aliases.contains(name) else {
+            Out.say("  \(name) is already a Host in \(shown). Choose another name.")
+            continue
+        }
+        Out.say("\n" + indented(block(name)))
+        guard Terminal.ask("Add it to \(shown)? [Y/n]: ").map({ !$0.lowercased().hasPrefix("n") }) == true else {
+            Out.say("  Not added.")
+            return nil
+        }
+        try file.append(block: block(name))
+        Out.say("  ✓ Added. From now on: ssh \(name)")
+        return name
+    }
+}
+
+/// How `ssh` reaches an inventory server: the first Host alias (or the
+/// entry's own name) that resolves to it and uses the Touch ID agent.
+func sshConfigStatus(for entry: InventoryEntry, paths: AgentPaths) -> (ok: Bool, text: String) {
+    let file = SSHConfigFile.forTarget(configFile: entry.sshConfigFile)
+    for name in [entry.alias] + file.hostAliases() {
+        guard let resolved = try? RemoteKeys.resolve(SSHTarget(destination: name, configFile: entry.sshConfigFile)),
+              resolved.hostname == entry.hostname, resolved.port == entry.port else { continue }
+        if resolved.usesTouchIDAgent(paths) {
+            return (true, "ssh config: `ssh \(name)` uses the Touch ID agent")
+        }
+    }
+    return (false, "ssh config: no Host uses the Touch ID agent for this server. Add one with "
+        + "`\(tool) config NAME --host \(entry.hostname) --user \(entry.user) --port \(entry.port)`")
 }
 
 func describe(_ check: LoginCheck) -> String {
@@ -397,20 +488,29 @@ func describe(_ check: LoginCheck) -> String {
 }
 
 func audit(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
-    let wanted = Set(arguments)
+    let inventory = try InventoryStore.load(from: paths)
+    guard !inventory.servers.isEmpty else {
+        Out.say("The inventory is empty. Add servers with `\(tool) authorize`.")
+        return
+    }
+    Out.header("audit", "check the keys on every server")
+    if try runAudit(aliases: Set(arguments), paths: paths) > 0 { exit(1) }
+}
+
+/// Checks the inventory servers named in `aliases` (all when empty), records
+/// the results and returns how many need attention.
+@discardableResult
+func runAudit(aliases wanted: Set<String>, paths: AgentPaths) throws -> Int {
     var inventory = try InventoryStore.load(from: paths)
     let entries = inventory.servers.filter { wanted.isEmpty || wanted.contains($0.alias) }
     guard !entries.isEmpty else {
-        Out.say(inventory.servers.isEmpty
-            ? "The inventory is empty. Add servers with `\(tool) authorize`."
-            : "No server named \(wanted.sorted().joined(separator: ", ")) in the inventory.")
-        return
+        Out.say("No server named \(wanted.sorted().joined(separator: ", ")) in the inventory.")
+        return 0
     }
     let identity = requireIdentity(paths)
     let recoveryKey = try requireRecoveryKey(paths)
     let keys = [AuthorizedKey.login(identity), AuthorizedKey.recovery(recoveryKey)]
 
-    Out.header("audit", "check the keys on every server")
     Out.say("Checking \(entries.count) server\(entries.count == 1 ? "" : "s"); each one asks for Touch ID.")
     var problems = 0
     for entry in entries {
@@ -420,15 +520,22 @@ func audit(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
         let result = auditSummary(outcome)
         Out.say("  \(result.ok ? "✓" : "✗") \(result.text)")
         if !result.ok { problems += 1 }
+        let config = sshConfigStatus(for: entry, paths: paths)
+        Out.say("  \(config.ok ? "✓" : "!") \(config.text)")
         if let index = inventory.servers.firstIndex(where: { $0.alias == entry.alias }) {
             inventory.servers[index].lastAudit = .wholeSecondsNow
             inventory.servers[index].lastAuditResult = result.text
+            // Backfill host keys for entries recorded before they were stored.
+            if outcome.login == .ok, let resolved = try? RemoteKeys.resolve(target) {
+                let keys = HostKeys.known(for: resolved)
+                if !keys.isEmpty { inventory.servers[index].hostKeys = keys }
+            }
         }
     }
     try InventoryStore.save(inventory, to: paths)
     reportBackup(InventoryBackup.export(paths: paths), paths: paths)
     Out.say(problems == 0 ? "\nAll servers have both keys." : "\n\(problems) server\(problems == 1 ? "" : "s") need attention: run `\(tool) authorize` for them.")
-    if problems > 0 { exit(1) }
+    return problems
 }
 
 func auditSummary(_ outcome: AuditOutcome) -> (ok: Bool, text: String) {

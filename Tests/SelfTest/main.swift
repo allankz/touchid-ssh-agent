@@ -969,7 +969,11 @@ if runDocker {
 
     test("authorize: resolve, add both keys once, verify the Touch ID key") {
         let resolved = try RemoteKeys.resolve(target)
-        check(resolved == ResolvedTarget(hostname: "127.0.0.1", user: "tester", port: Int(authPort) ?? 0), "ssh -G: \(resolved)")
+        check(resolved.hostname == "127.0.0.1" && resolved.user == "tester" && resolved.port == Int(authPort), "ssh -G: \(resolved)")
+        check(resolved.identityFiles == [bootstrap.path] && resolved.identitiesOnly, "identity files: \(resolved.identityFiles)")
+        check(resolved.userKnownHostsFiles == [work.appendingPathComponent("known_hosts").path], "known_hosts: \(resolved.userKnownHostsFiles)")
+        check(resolved.knownHostsName == "[127.0.0.1]:\(authPort)", "known_hosts name: \(resolved.knownHostsName)")
+        check(!resolved.usesTouchIDAgent(approving.paths), "bootstrap config does not use the agent")
 
         check(try RemoteKeys.install(keys, on: target) == ["login": true, "recovery": true], "both added")
         check(try RemoteKeys.install(keys, on: target) == ["login": false, "recovery": false], "second run adds nothing")
@@ -1048,14 +1052,199 @@ if runDocker {
         spawn $env(CLI) authorize e2e -F $env(CFG) --alias e2e-ask
         expect {
           "continue connecting" { send -- "yes\r"; exp_continue }
-          "accepted the Touch ID key" { puts "\nRESULT=ok" }
+          "accepted the Touch ID key" { puts "\nRESULT=ok"; exp_continue }
+          "Add them?" { send -- "n\r"; exp_continue }
           timeout { puts "\nRESULT=hung"; exit 3 }
-          eof { puts "\nRESULT=eof" }
+          eof
         }
-        expect eof
         """#, paths: approving.paths, extra: ["CFG": asking.path], in: work)
         check(result.stdout.contains("continue connecting"), "ssh's host key question reached the terminal")
         check(result.stdout.contains("RESULT=ok"), "authorize finished: \(result.stdout.suffix(300))")
+    }
+
+    test("CLI authorize: a server without an alias gets a friendly name in ssh config and the inventory") {
+        let friendlyConfig = work.appendingPathComponent("ssh_config_friendly")
+        try """
+        Host *
+          UserKnownHostsFile \(work.appendingPathComponent("known_hosts").path)
+          StrictHostKeyChecking no
+          LogLevel ERROR
+        """.write(to: friendlyConfig, atomically: true, encoding: .utf8)
+        let result = try expectScript(#"""
+        set timeout 60
+        spawn $env(CLI) authorize tester@127.0.0.1 -p $env(PORT) -F $env(CFG) -- -i $env(BOOT) -o IdentitiesOnly=yes -o IdentityAgent=none
+        expect {
+          "or Enter to skip" { send -- "e2e-friendly\r"; exp_continue }
+          "Add it to" { send -- "y\r"; exp_continue }
+          timeout { puts "\nRESULT=hung"; exit 3 }
+          eof
+        }
+        catch wait result
+        puts "\nEXIT=[lindex $result 3]"
+        """#, paths: approving.paths, extra: ["CFG": friendlyConfig.path, "PORT": authPort, "BOOT": bootstrap.path], in: work)
+        check(result.stdout.contains("EXIT=0"), "authorize succeeded: \(result.stdout.suffix(400))")
+        let configText = (try? String(contentsOf: friendlyConfig, encoding: .utf8)) ?? ""
+        check(configText.contains("Host e2e-friendly") && configText.contains("IdentityAgent ")
+              && configText.contains("IdentitiesOnly yes"), "block appended: \(configText)")
+        let servers = try InventoryStore.load(from: approving.paths).servers
+        let entry = servers.first { $0.alias == "e2e-friendly" }
+        check(entry?.destination == "e2e-friendly", "inventory uses the friendly name")
+        check(entry?.hostKeys?.isEmpty == false, "host key recorded: \(entry?.hostKeys ?? [])")
+        check(servers.filter { $0.hostname == "127.0.0.1" && $0.port == Int(authPort) }.count == 1, "one entry per server")
+        let login = try run("/usr/bin/ssh", ["-F", friendlyConfig.path, "-o", "BatchMode=yes", "e2e-friendly", "echo friendly-ok"])
+        check(login.stdout.contains("friendly-ok"), "ssh e2e-friendly goes through the agent: \(login.stderr)")
+        let audited = try run(cliBinary, ["audit", "e2e-friendly"], environment: [AgentPaths.environmentVariable: approving.paths.directory.path])
+        check(audited.stdout.contains("`ssh e2e-friendly` uses the Touch ID agent"), "audit sees the ssh config: \(audited.stdout)")
+    }
+
+    // Recovery: an "old Mac" authorizes a fresh server, then "new Macs" take it over.
+    var recContainer: String?
+    let oldMac = try LiveAgent.start()
+    defer {
+        oldMac.stop()
+        if let recContainer { _ = try? run(docker, ["rm", "-f", recContainer]) }
+    }
+    let recConfig = work.appendingPathComponent("ssh_config_rec")
+    let newConfig = work.appendingPathComponent("ssh_config_new")
+    let newKnownHosts = work.appendingPathComponent("known_hosts_new")
+    let recCloud = work.appendingPathComponent("rec cloud")
+    let recBackup = recCloud.appendingPathComponent(InventoryBackup.fileName)
+    let oldKitFile = work.appendingPathComponent("old-emergency-kit.txt")
+    let oldPassphrase = Passphrase.generate()
+    var recPort = ""
+    var oldKeys: [AuthorizedKey] = []
+
+    func onRecServer(_ script: String) throws -> String {
+        try run("/usr/bin/ssh", ["-F", recConfig.path, "-o", "IdentityAgent=none", "rec", "sh -s"], stdin: Data(script.utf8)).stdout
+    }
+    func recServerBlobs() throws -> [Data] {
+        try onRecServer("cat $HOME/.ssh/authorized_keys").split(separator: "\n")
+            .compactMap { RemoteKeys.keyBlob(inAuthorizedKeysLine: String($0)) }
+    }
+    /// Drives `recover` or `recovery test` through both passphrase prompts.
+    func runRecovery(_ command: String, on newMac: LiveAgent) throws -> ShellResult {
+        try expectScript(#"""
+        set timeout 180
+        spawn $env(CLI) {*}$env(CMD) $env(KIT) --inventory $env(INV) -F $env(CFG)
+        expect {
+          "Enter passphrase" { send -- "$env(PASS)\r"; exp_continue }
+          "Type RECOVER" { send -- "RECOVER\r"; exp_continue }
+          "or Enter to skip" { send -- "\r"; exp_continue }
+          "Add it to" { send -- "y\r"; exp_continue }
+          "Add them?" { send -- "n\r"; exp_continue }
+          timeout { puts "\nRESULT=hung"; exit 3 }
+          eof
+        }
+        catch wait result
+        puts "\nEXIT=[lindex $result 3]"
+        """#, paths: newMac.paths, extra: ["CMD": command, "KIT": oldKitFile.path, "INV": recBackup.path,
+                                           "CFG": newConfig.path, "PASS": oldPassphrase], in: work)
+    }
+
+    test("recovery setup: the old Mac authorizes a fresh server and backs up its inventory") {
+        let started = try run(docker, ["run", "-d", "--rm", "-p", "127.0.0.1::22", "-e", "AUTHORIZED_KEYS=\(bootstrapLine)", image])
+        recContainer = started.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        recPort = try run(docker, ["port", recContainer ?? "", "22/tcp"]).stdout
+            .split(separator: "\n").first?.split(separator: ":").last.map(String.init) ?? ""
+        for _ in 0..<50 {
+            if (try? run("/usr/bin/nc", ["-z", "127.0.0.1", recPort]))?.status == 0 { break }
+            usleep(100_000)
+        }
+        usleep(500_000)
+        try """
+        Host rec
+          HostName 127.0.0.1
+          Port \(recPort)
+          User tester
+          IdentityFile \(bootstrap.path)
+          IdentitiesOnly yes
+          StrictHostKeyChecking no
+          UserKnownHostsFile \(work.appendingPathComponent("known_hosts_rec").path)
+          LogLevel ERROR
+        """.write(to: recConfig, atomically: true, encoding: .utf8)
+        try "Host *\n  UserKnownHostsFile \(newKnownHosts.path)\n  LogLevel ERROR\n".write(to: newConfig, atomically: true, encoding: .utf8)
+
+        // The old kit, passphrase-protected and saved like a download (0644).
+        try FileManager.default.createDirectory(at: recCloud, withIntermediateDirectories: false)
+        let kit = try EmergencyKitBuilder.build(
+            passphrase: oldPassphrase,
+            details: .init(macName: "oldmac", loginKeyFingerprint: oldMac.identity.fingerprint, backupFolder: recCloud.path),
+            paths: oldMac.paths)
+        try FileManager.default.copyItem(at: kit.file, to: oldKitFile)
+        chmod(oldKitFile.path, 0o644)
+        try EmergencyKitBuilder.finalize(kit, paths: oldMac.paths, replace: false)
+        oldKeys = [AuthorizedKey.login(oldMac.identity), AuthorizedKey.recovery(kit.recoveryKey)]
+
+        let target = SSHTarget(destination: "rec", configFile: recConfig.path)
+        _ = try RemoteKeys.install(oldKeys, on: target)
+        let hostKeys = HostKeys.known(for: try RemoteKeys.resolve(target))
+        check(!hostKeys.isEmpty, "host key captured from known_hosts")
+        var inventory = Inventory(mac: "touchid-ssh-agent@oldmac")
+        inventory.upsert(InventoryEntry(alias: "rec-server", destination: "rec", hostname: "127.0.0.1", user: "tester",
+                                        port: Int(recPort) ?? 0, sshConfigFile: recConfig.path,
+                                        loginKeyFingerprint: oldMac.identity.fingerprint,
+                                        recoveryKeyFingerprint: kit.recoveryKey.fingerprint,
+                                        authorizedAt: .wholeSecondsNow, hostKeys: hostKeys))
+        try InventoryStore.save(inventory, to: oldMac.paths)
+        check(InventoryBackup.export(paths: oldMac.paths, settings: AgentSettings(backupPath: recCloud.path)).isWritten, "backup written")
+        let blobs = try recServerBlobs()
+        check(oldKeys.allSatisfy { blobs.contains($0.blob) }, "server trusts the old Mac's keys")
+    }
+
+    test("recovery test: the old kit logs in everywhere and nothing changes") {
+        let before = try onRecServer("cat $HOME/.ssh/authorized_keys")
+        let probe = try LiveAgent.start()
+        defer { probe.stop() }
+        let result = try runRecovery("recovery test", on: probe)
+        check(result.stdout.contains("EXIT=0") && result.stdout.contains("opens every server"), "dry run: \(result.stdout.suffix(500))")
+        check(result.stdout.contains("asked for your emergency passphrase twice"), "warns about the two prompts")
+        check(try onRecServer("cat $HOME/.ssh/authorized_keys") == before, "authorized_keys unchanged")
+        check(!FileManager.default.fileExists(atPath: newKnownHosts.path), "this Mac's known_hosts untouched")
+    }
+
+    test("recover: a denied Touch ID check keeps the old keys and the backup") {
+        let denied = try LiveAgent.start(failingWith: .canceled)
+        defer { denied.stop() }
+        try RecoveryStore.importPublicKey(from: try plainKit(in: work, name: "denied-emergency").publicKey, into: denied.paths, replace: false)
+        try SettingsStore.save(AgentSettings(backupPath: recCloud.path), to: denied.paths)
+        let backupBefore = try Data(contentsOf: recBackup)
+        let result = try runRecovery("recover", on: denied)
+        check(result.stdout.contains("EXIT=1"), "recover reports the failure: \(result.stdout.suffix(500))")
+        check(result.stdout.contains("Keep the old emergency kit"), "tells the user to keep the old kit")
+        let blobs = try recServerBlobs()
+        check(oldKeys.allSatisfy { blobs.contains($0.blob) }, "old keys are still on the server")
+        check((try? Data(contentsOf: recBackup)) == backupBefore, "backup left unchanged")
+    }
+
+    test("recover: this Mac's keys in, the lost Mac's key and the used emergency key out, audit passes") {
+        let newMac = try LiveAgent.start()
+        defer { newMac.stop() }
+        let newKit = try plainKit(in: work, name: "new-emergency")
+        let newEmergency = try RecoveryStore.importPublicKey(from: newKit.publicKey, into: newMac.paths, replace: false)
+        try SettingsStore.save(AgentSettings(backupPath: recCloud.path), to: newMac.paths)
+        let result = try runRecovery("recover", on: newMac)
+        check(result.stdout.contains("EXIT=0"), "recover succeeded: \(result.stdout.suffix(800))")
+        check(result.stdout.contains("host key checked against the inventory"), "host key pinned from the inventory")
+        check(result.stdout.contains("All servers have both keys."), "audit at the end passes")
+        check(result.stdout.contains("you can destroy it"), "old kit retired")
+
+        let blobs = try recServerBlobs()
+        check(blobs.contains(newMac.identity.publicKeyBlob) && blobs.contains(newEmergency.blob), "new keys installed")
+        check(!blobs.contains(oldKeys[0].blob), "lost Mac's key removed")
+        check(!blobs.contains(oldKeys[1].blob), "used emergency key removed")
+        check(blobs.contains(RemoteKeys.keyBlob(inAuthorizedKeysLine: bootstrapLine) ?? Data()), "other keys untouched")
+
+        let entry = try InventoryStore.load(from: newMac.paths).servers.first { $0.alias == "rec-server" }
+        check(entry?.loginKeyFingerprint == newMac.identity.fingerprint && entry?.recoveryKeyFingerprint == newEmergency.fingerprint,
+              "inventory points to this Mac's keys")
+        check((try? String(contentsOf: newConfig, encoding: .utf8))?.contains("Host rec-server") == true, "ssh config block added")
+        check(((try? String(contentsOf: newKnownHosts, encoding: .utf8)) ?? "").contains("[127.0.0.1]:\(recPort)"), "host key remembered")
+        let decrypted = try run(agePath ?? "age", ["-d", "-i", newKit.kit.path, recBackup.path])
+        let backedUp = try? Inventory.decode(Data(decrypted.stdout.utf8))
+        check(backedUp?.servers.first { $0.alias == "rec-server" }?.loginKeyFingerprint == newMac.identity.fingerprint,
+              "new backup opens with the new kit and lists this Mac's key: \(decrypted.stderr)")
+        let kept = ((try? FileManager.default.contentsOfDirectory(atPath: recCloud.path)) ?? []).filter { $0.hasPrefix("inventory-before-recovery-") }
+        check(kept.count == 1, "previous backup preserved: \(kept)")
     }
 } else {
     print("(real Docker login skipped; use --docker)")
