@@ -54,6 +54,10 @@ struct RecoverOptions {
 
 /// `recover` moves every inventory server to this Mac; `recovery test` (dryRun)
 /// only checks that the emergency kit still logs in everywhere.
+///
+/// The kit's passphrase is asked first (by age, then by ssh-add) and never
+/// again. Everything is checked before the user chooses whether to replace the
+/// emergency key, and no server changes until they type RECOVER.
 func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) throws {
     let command = dryRun ? "recovery test" : "recover"
     let options = try RecoverOptions(arguments, command: command)
@@ -65,19 +69,21 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
         throw UsageError(description: "age is not installed. Run `make install` or `brew install age`.")
     }
     let notes = KitNotes(kitText: String(decoding: kitData, as: UTF8.self))
-    let steps = dryRun ? 3 : 6
+    let steps = dryRun ? 2 : 6
 
     Out.header(command, dryRun ? "check the emergency kit; nothing changes" : "move your servers to this Mac")
     Out.say("""
-    You will be asked for your emergency passphrase twice, for security: first
-    by age, to open the inventory, then by ssh-add, to load the emergency key.
-    Each tool asks for it itself, so this program never sees the passphrase.
-    """)
+    You will be asked for this kit's passphrase twice, one right after the
+    other, for security: age asks for it to open the inventory, then ssh-add
+    asks again to load the emergency key. Each tool reads it itself, so this
+    program never sees it, and it is not asked again after that.
+    """ + (dryRun ? "" : "\n\nEverything is checked first. No server changes until you type RECOVER."))
 
-    // 1. Open the inventory with the kit.
-    Out.section("1/\(steps) Opening the inventory")
+    // 1. The kit's passphrase, twice and only here: the inventory, then the key.
+    Out.section("1/\(steps) Opening the kit")
     let inventoryFile = try locateInventory(options: options, notes: notes, paths: paths)
-    Out.say("  \(paths.displayPath(inventoryFile))")
+    Out.say("  Inventory: \(paths.displayPath(inventoryFile))")
+    Out.say("\n  age asks for this kit's passphrase:")
     let decrypted = try Command.runAttachedToTerminal(age, ["-d", "-i", options.kit.path, inventoryFile.path], stdin: Data())
     guard decrypted.succeeded, let old = try? Inventory.decode(decrypted.stdout) else {
         throw UsageError(description: "could not open the inventory with this kit (wrong passphrase, or a backup from another kit).")
@@ -87,99 +93,119 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
     for entry in old.servers {
         Out.say("    • \(entry.alias)  (\(entry.user)@\(entry.hostname):\(entry.port))")
     }
+    let existing = try IdentityStore.load(from: paths)
+    if !dryRun { try refuseKeysInUse(old, identity: existing, paths: paths) }
+
+    let agent = try EmergencyAgent()
+    defer { agent.stop() }
+    Out.say("\n  ssh-add asks for the same passphrase again:")
+    // An hour: on a recovery the user may create a new kit before the logins.
+    let loaded = try agent.load(kit: kitData, lifetimeSeconds: 3600)
+    Out.say("  Emergency key loaded: \(loaded.fingerprint). The passphrase is not asked again.")
+    if let noted = notes.emergencyFingerprint, noted != loaded.fingerprint {
+        Out.say("  ! The kit's key is not the one the kit's notes name (\(noted)).")
+    }
 
     if dryRun {
-        try testEmergencyLogins(old, kitData: kitData, notes: notes, options: options, paths: paths)
+        Out.section("2/2 Logging in with the emergency key only")
+        let failures = emergencyLogins(old, agent: agent, configFile: options.configFile).filter { !$0 }.count
+        Out.say(failures == 0
+            ? "\nThe emergency kit opens every server in the inventory. Nothing was changed."
+            : "\n\(failures) server\(failures == 1 ? "" : "s") did not accept the emergency key. Run `\(tool) authorize` for them.")
+        if failures > 0 { exit(1) }
         return
     }
 
-    // 2. This Mac's Touch ID key, and the agent that uses it.
-    Out.section("2/\(steps) Touch ID key on this Mac")
-    let identity = try IdentityStore.load(from: paths) ?? {
+    // 2. This Mac and the servers, before anything changes on them.
+    Out.section("2/\(steps) Checking")
+    let identity = try existing ?? {
         let created = try IdentityStore.create(in: paths, policy: .currentSet)
-        Out.say("  Created in the Secure Enclave: \(created.fingerprint)")
+        Out.say("  Touch ID key created in the Secure Enclave: \(created.fingerprint)")
         return created
     }()
-    if old.servers.contains(where: { $0.loginKeyFingerprint == identity.fingerprint }) {
-        throw UsageError(description: """
-        this Mac's Touch ID key (\(identity.fingerprint)) is the one the inventory lists,
-        so recovering would remove the key this Mac is using. If it stopped working
-        (for example, fingerprints changed), delete it first with `\(tool) delete`.
-        """)
-    }
-    // With another TOUCHID_SSH_AGENT_DIR, the Mac's main key would not be seen
-    // above, and recover would remove it from the servers.
-    if !paths.isDefault, let main = try? IdentityStore.load(from: AgentPaths(directory: AgentPaths.defaultDirectory)),
-       old.servers.contains(where: { $0.loginKeyFingerprint == main.fingerprint }) {
-        throw UsageError(description: """
-        this Mac's main Touch ID key (\(main.fingerprint), in \(AgentPaths(directory: AgentPaths.defaultDirectory).displayPath(AgentPaths.defaultDirectory)))
-        is the one the inventory lists. recover is for a new Mac: running it here with another
-        directory would remove this Mac's key from the servers. To rehearse a recovery on this
-        Mac, run `\(tool) recovery test emergency-kit.txt`, which changes nothing.
-        """)
-    }
-    Out.say("  \(identity.fingerprint)")
+    if existing != nil { Out.say("  Touch ID key: \(identity.fingerprint)") }
     try ensureAgentRunning(paths: paths)
-
-    // 3. A fresh emergency key: the one in this kit is about to be used.
-    Out.section("3/\(steps) Emergency kit")
-    let oldEmergency = notes.emergencyFingerprint ?? old.servers.first?.recoveryKeyFingerprint
     try adoptBackupFolder(of: inventoryFile, paths: paths)
-    var current = try RecoveryStore.load(from: paths)
-    // --keep-emergency-key with no key on this Mac: adopt the kit's own key
-    // once it is loaded, instead of creating a new kit.
-    let adoptKitKey = options.keepEmergencyKey && current == nil
-    if adoptKitKey {
-        Out.say("  Keeping this kit's emergency key (--keep-emergency-key). Its public half is installed on this Mac once the kit is loaded.")
-    } else if current == nil || (current?.fingerprint == oldEmergency && !options.keepEmergencyKey) {
-        Out.say("  Once used, an emergency key counts as exposed, so a new kit replaces it.\n")
-        try createEmergencyKit(paths: paths, replace: current != nil, ownPassphrase: false)
-        current = try RecoveryStore.load(from: paths)
-        guard current != nil else {
-            throw UsageError(description: "no new emergency key was configured, so nothing was changed.")
-        }
-    } else {
-        Out.say("  Using the emergency key already configured on this Mac: \(current!.fingerprint)")
+    Out.say("\n  Logging in with the emergency key only (nothing changes):")
+    let reachable = emergencyLogins(old, agent: agent, configFile: options.configFile)
+    let unreachable = reachable.filter { !$0 }.count
+    guard unreachable < old.servers.count else {
+        throw UsageError(description: "no server accepted this kit's key, so nothing was changed.")
     }
-    let rotating = !adoptKitKey && current?.fingerprint != oldEmergency
+    if unreachable > 0 {
+        Out.say("\n  \(unreachable) server\(unreachable == 1 ? "" : "s") did not accept this kit's key and will be left as \(unreachable == 1 ? "it is" : "they are").")
+    }
+
+    // 3. Keep the kit's emergency key, or replace it with a new kit.
+    Out.section("3/\(steps) Emergency key")
+    let newEmergency: RecoveryKey
+    let rotating: Bool
+    let configured = try RecoveryStore.load(from: paths)
+    // Compared by fingerprint: the same key may carry another comment.
+    if let configured, configured.fingerprint != loaded.fingerprint {
+        // From setup, or from an earlier recover run that replaced the key.
+        if options.keepEmergencyKey {
+            throw UsageError(description: """
+            this Mac already has its own emergency key (\(configured.fingerprint)),
+            so --keep-emergency-key cannot keep the kit's key. Run recover without it.
+            """)
+        }
+        Out.say("""
+          This Mac already has its own emergency key: \(configured.fingerprint).
+          The servers get it, and this kit's key is removed from them.
+        """)
+        newEmergency = configured
+        rotating = true
+    } else if try options.keepEmergencyKey || !askReplaceEmergencyKey(loaded) {
+        if configured == nil { try RecoveryStore.install(loaded, in: paths, replace: false) }
+        Out.say("  Keeping this kit's emergency key: \(loaded.fingerprint). This kit stays your emergency kit.")
+        newEmergency = loaded
+        rotating = false
+    } else {
+        Out.say("""
+
+          This kit is already loaded, so its passphrase is not asked again: the
+          servers are updated with it. The passphrase shown next is for the NEW kit.
+
+        """)
+        try createEmergencyKit(paths: paths, replace: configured != nil, ownPassphrase: false, duringRecovery: true)
+        guard let created = try RecoveryStore.load(from: paths), created.fingerprint != loaded.fingerprint else {
+            throw UsageError(description: "no new emergency kit was saved, so no server was changed. Run recover again.")
+        }
+        Out.say("\n  The servers get the new emergency key, and this kit's key is removed from them.")
+        newEmergency = created
+        rotating = true
+    }
 
     // 4. Every server: add the new keys, check Touch ID, remove the old keys.
     Out.section("4/\(steps) Moving the servers")
     Out.say("""
     For each server: add this Mac's keys, check the Touch ID login (one Touch ID),
-    then remove the lost Mac's key\(rotating ? " and the old emergency key" : "").
+    then remove the lost Mac's key\(rotating ? " and this kit's emergency key" : "").
     """)
+    let toMove = reachable.filter { $0 }.count
     guard Terminal.confirm(word: "RECOVER", cancelWord: "ABORT",
-                           prompt: "Type RECOVER to update \(old.servers.count) server\(old.servers.count == 1 ? "" : "s") (or ABORT): ") else {
+                           prompt: "Type RECOVER to update \(toMove) server\(toMove == 1 ? "" : "s") (or ABORT): ") else {
         Out.say("Aborted. No server was changed.")
         return
-    }
-    let agent = try EmergencyAgent()
-    defer { agent.stop() }
-    let loaded = try agent.load(kit: kitData)
-    if let oldEmergency, loaded.fingerprint != oldEmergency {
-        Out.say("  ! The kit's key (\(loaded.fingerprint)) is not the one the kit's notes name (\(oldEmergency)).")
-    }
-    if adoptKitKey {
-        try RecoveryStore.install(loaded, in: paths, replace: false)
-        current = loaded
-        Out.say("  Emergency key kept: \(loaded.fingerprint)")
-    }
-    guard let newEmergency = current else {
-        throw UsageError(description: "no emergency key is configured, so nothing was changed.")
     }
 
     var results: [(entry: InventoryEntry, ok: Bool, text: String)] = []
     let alreadyHere = try InventoryStore.load(from: paths).servers
-    for entry in old.servers {
+    for (entry, accepted) in zip(old.servers, reachable) {
         Out.say("\n\(entry.alias)  (\(entry.user)@\(entry.hostname):\(entry.port))")
         // A previous run already moved this server: running again is safe.
         if let moved = alreadyHere.first(where: {
             $0.hostname == entry.hostname && $0.port == entry.port && $0.user == entry.user
-                && $0.loginKeyFingerprint == identity.fingerprint
+                && $0.loginKeyFingerprint == identity.fingerprint && $0.recoveryKeyFingerprint == newEmergency.fingerprint
         }) {
             Out.say("  ✓ already moved to this Mac by an earlier run; skipped")
             results.append((moved, true, "already moved"))
+            continue
+        }
+        guard accepted else {
+            Out.say("  ✗ skipped: it did not accept this kit's key during the check")
+            results.append((entry, false, "did not accept the emergency key"))
             continue
         }
         let result = recoverServer(entry, configFile: options.configFile, agent: agent,
@@ -196,7 +222,7 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
     try InventoryStore.save(inventory, to: paths)
     let failed = results.filter { !$0.ok }
     if failed.isEmpty {
-        preserveOldBackup(inventoryFile, paths: paths)
+        if rotating { preserveOldBackup(inventoryFile, paths: paths) }
         reportBackup(InventoryBackup.export(paths: paths), paths: paths)
     } else {
         // The old backup stays as it is, so the old kit can open it for another run.
@@ -230,7 +256,9 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
     if failed.isEmpty {
         Out.say("""
 
-        All servers now trust this Mac. \(rotating ? "The old emergency kit was removed from every server: you can destroy it." : "")
+        All servers now trust this Mac. \(rotating
+            ? "The old emergency kit was removed from every server: you can destroy it."
+            : "Keep the emergency kit you used: it is still the one every server trusts.")
         """)
     } else {
         Out.say("""
@@ -241,6 +269,48 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
         """)
         exit(1)
     }
+}
+
+/// Refuses to recover with a Touch ID key that the inventory already lists:
+/// recovering would remove the key this Mac is using.
+func refuseKeysInUse(_ inventory: Inventory, identity: StoredIdentity?, paths: AgentPaths) throws {
+    if let identity, inventory.servers.contains(where: { $0.loginKeyFingerprint == identity.fingerprint }) {
+        throw UsageError(description: """
+        this Mac's Touch ID key (\(identity.fingerprint)) is the one the inventory lists,
+        so recovering would remove the key this Mac is using. If it stopped working
+        (for example, fingerprints changed), delete it first with `\(tool) delete`.
+        """)
+    }
+    // With another TOUCHID_SSH_AGENT_DIR, the Mac's main key would not be seen
+    // above, and recover would remove it from the servers.
+    let mainPaths = AgentPaths(directory: AgentPaths.defaultDirectory)
+    if !paths.isDefault, let main = try? IdentityStore.load(from: mainPaths),
+       inventory.servers.contains(where: { $0.loginKeyFingerprint == main.fingerprint }) {
+        throw UsageError(description: """
+        this Mac's main Touch ID key (\(main.fingerprint), in \(mainPaths.displayPath(AgentPaths.defaultDirectory)))
+        is the one the inventory lists. recover is for a new Mac: running it here with another
+        directory would remove this Mac's key from the servers. To rehearse a recovery on this
+        Mac, run `\(tool) recovery test emergency-kit.txt`, which changes nothing.
+        """)
+    }
+}
+
+/// Asks whether to replace the kit's emergency key. Enter means replace.
+func askReplaceEmergencyKey(_ key: RecoveryKey) throws -> Bool {
+    Out.say("""
+      The servers trust this kit's emergency key (\(key.fingerprint)).
+
+        Replace  You save a new kit with a new passphrase, and this kit's key
+                 is removed from every server. Choose it if anyone else may
+                 have seen this kit or its passphrase, or if you are not sure.
+        Keep     Nothing new to save: this kit stays your emergency kit.
+    """)
+    while let answer = Terminal.ask("Replace the emergency key with a new kit? [Y/n]: ")?
+        .trimmingCharacters(in: .whitespaces).lowercased() {
+        if ["", "y", "yes"].contains(answer) { return true }
+        if ["n", "no"].contains(answer) { return false }
+    }
+    throw UsageError(description: "no answer, so nothing was changed.")
 }
 
 /// Moves one server to this Mac. The old keys are removed only after the new
@@ -315,36 +385,24 @@ func recoverServer(_ entry: InventoryEntry, configFile: String?, agent: Emergenc
     return (updated, true, "moved to this Mac; \(removedText)")
 }
 
-/// `recovery test`: logs in to every server with the emergency key only.
-func testEmergencyLogins(_ inventory: Inventory, kitData: Data, notes: KitNotes, options: RecoverOptions, paths: AgentPaths) throws {
-    Out.section("2/3 Loading the emergency key")
-    let agent = try EmergencyAgent()
-    defer { agent.stop() }
-    let loaded = try agent.load(kit: kitData)
-    Out.say("  \(loaded.fingerprint)")
-
-    Out.section("3/3 Logging in with the emergency key only")
-    var failures = 0
-    for entry in inventory.servers {
-        let target = SSHTarget(destination: "\(entry.user)@\(entry.hostname)", port: entry.port, configFile: options.configFile)
+/// Logs in to every server with the emergency key only, in order, and returns
+/// which ones accepted it. Nothing changes: unknown host keys go to a scratch file.
+func emergencyLogins(_ inventory: Inventory, agent: EmergencyAgent, configFile: String?) -> [Bool] {
+    inventory.servers.map { entry in
+        let target = SSHTarget(destination: "\(entry.user)@\(entry.hostname)", port: entry.port, configFile: configFile)
         let resolved = try? RemoteKeys.resolve(target)
         let policy: KnownHostsPolicy
         if let resolved, let keys = entry.hostKeys, !keys.isEmpty,
            let pinned = try? KnownHostsPolicy.pinned(keys, for: resolved, in: agent.directory) {
             policy = pinned
         } else {
-            // Nothing on this Mac changes: unknown host keys go to a scratch file.
             policy = .acceptNew(agent.directory.appendingPathComponent("known_hosts-test"))
         }
         let session = RemoteKeys.emergencySession(target, agent: agent, knownHosts: policy, script: nil)
         Out.say("  \(session.ok ? "✓" : "✗") \(entry.alias)  (\(entry.user)@\(entry.hostname):\(entry.port))"
             + (session.ok ? "" : ": \(session.error)"))
-        if !session.ok { failures += 1 }
+        return session.ok
     }
-    Out.say(failures == 0
-        ? "\nThe emergency kit opens every server in the inventory. Nothing was changed."
-        : "\n\(failures) server\(failures == 1 ? "" : "s") did not accept the emergency key. Run `\(tool) authorize` for them.")
-    if failures > 0 { exit(1) }
 }
 
 /// Finds inventory.age: --inventory, the folder named in the kit, this Mac's
@@ -394,7 +452,7 @@ func preserveOldBackup(_ inventoryFile: URL, paths: AgentPaths) {
     guard let folder = SettingsStore.load(from: paths).backupDirectory,
           inventoryFile.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL else { return }
     let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd-HHmm"
+    formatter.dateFormat = "yyyy-MM-dd-HHmmss"
     let copy = folder.appendingPathComponent("inventory-before-recovery-\(formatter.string(from: Date())).age")
     if (try? FileManager.default.copyItem(at: inventoryFile, to: copy)) != nil {
         Out.say("\nThe previous backup was kept as \(paths.displayPath(copy)) (it opens with the old kit).")

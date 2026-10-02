@@ -71,7 +71,10 @@ func reportBackup(_ outcome: InventoryBackup.Outcome, paths: AgentPaths) {
 
 // MARK: - Emergency kit
 
-func createEmergencyKit(paths: AgentPaths, replace: Bool, ownPassphrase: Bool, showHeader: Bool = false) throws {
+/// With `duringRecovery`, recover itself installs the new key on the servers
+/// and writes the backup once every server moved, so neither happens here.
+func createEmergencyKit(paths: AgentPaths, replace: Bool, ownPassphrase: Bool, showHeader: Bool = false,
+                        duringRecovery: Bool = false) throws {
     try Terminal.requireInteractive("recovery create")
     if showHeader { Out.header("recovery create", "a new emergency kit") }
     let previous = try RecoveryStore.load(from: paths)
@@ -127,6 +130,7 @@ func createEmergencyKit(paths: AgentPaths, replace: Bool, ownPassphrase: Bool, s
     let key = try EmergencyKitBuilder.finalize(kit, paths: paths, replace: replace)
     Out.say("\nEmergency key configured: \(key.fingerprint)")
     Out.say("The copy of the kit on this Mac was erased.")
+    guard !duringRecovery else { return }
     reportBackup(InventoryBackup.export(paths: paths), paths: paths)
     if let previous, previous != key {
         Out.say("""

@@ -35,7 +35,7 @@ public final class EmergencyAgent {
     @discardableResult
     public func load(kit: Data, lifetimeSeconds: Int = 1800) throws -> RecoveryKey {
         let added = try Command.runAttachedToTerminal(
-            "/usr/bin/ssh-add", ["-t", String(lifetimeSeconds), "-"], stdin: kit,
+            "/usr/bin/ssh-add", ["-q", "-t", String(lifetimeSeconds), "-"], stdin: kit,
             environment: ["SSH_AUTH_SOCK": socket.path],
             removingEnvironment: EmergencyKitBuilder.askpassVariables
         )
