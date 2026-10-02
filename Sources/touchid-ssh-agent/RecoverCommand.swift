@@ -126,17 +126,22 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
     let oldEmergency = notes.emergencyFingerprint ?? old.servers.first?.recoveryKeyFingerprint
     try adoptBackupFolder(of: inventoryFile, paths: paths)
     var current = try RecoveryStore.load(from: paths)
-    if current == nil || (current?.fingerprint == oldEmergency && !options.keepEmergencyKey) {
+    // --keep-emergency-key with no key on this Mac: adopt the kit's own key
+    // once it is loaded, instead of creating a new kit.
+    let adoptKitKey = options.keepEmergencyKey && current == nil
+    if adoptKitKey {
+        Out.say("  Keeping this kit's emergency key (--keep-emergency-key). Its public half is installed on this Mac once the kit is loaded.")
+    } else if current == nil || (current?.fingerprint == oldEmergency && !options.keepEmergencyKey) {
         Out.say("  Once used, an emergency key counts as exposed, so a new kit replaces it.\n")
         try createEmergencyKit(paths: paths, replace: current != nil, ownPassphrase: false)
         current = try RecoveryStore.load(from: paths)
+        guard current != nil else {
+            throw UsageError(description: "no new emergency key was configured, so nothing was changed.")
+        }
     } else {
         Out.say("  Using the emergency key already configured on this Mac: \(current!.fingerprint)")
     }
-    guard let newEmergency = current else {
-        throw UsageError(description: "no new emergency key was configured, so nothing was changed.")
-    }
-    let rotating = newEmergency.fingerprint != oldEmergency
+    let rotating = !adoptKitKey && current?.fingerprint != oldEmergency
 
     // 4. Every server: add the new keys, check Touch ID, remove the old keys.
     Out.section("4/\(steps) Moving the servers")
@@ -154,6 +159,14 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
     let loaded = try agent.load(kit: kitData)
     if let oldEmergency, loaded.fingerprint != oldEmergency {
         Out.say("  ! The kit's key (\(loaded.fingerprint)) is not the one the kit's notes name (\(oldEmergency)).")
+    }
+    if adoptKitKey {
+        try RecoveryStore.install(loaded, in: paths, replace: false)
+        current = loaded
+        Out.say("  Emergency key kept: \(loaded.fingerprint)")
+    }
+    guard let newEmergency = current else {
+        throw UsageError(description: "no emergency key is configured, so nothing was changed.")
     }
 
     var results: [(entry: InventoryEntry, ok: Bool, text: String)] = []
