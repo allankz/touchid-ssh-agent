@@ -161,7 +161,7 @@ public enum EmergencyKitBuilder {
         do {
             let keyFile = paths.kitDirectory.appendingPathComponent(keyFileName)
             let comment = RemoteKeys.safeComment("touchid-recovery@\(details.macName)")
-            let generated = try Command.run(
+            let generated = try Command.runWithoutTerminal(
                 "/usr/bin/ssh-keygen",
                 ["-q", "-t", "ed25519", "-a", "200", "-C", comment, "-f", keyFile.path],
                 stdin: Data("\(passphrase)\n\(passphrase)\n".utf8),
@@ -191,7 +191,7 @@ public enum EmergencyKitBuilder {
 
     /// Decrypts the kit with `passphrase` and checks it yields `expected`.
     public static func verify(kitFile: URL, passphrase: String, expected: RecoveryKey) throws {
-        let derived = try Command.run(
+        let derived = try Command.runWithoutTerminal(
             "/usr/bin/ssh-keygen", ["-y", "-f", kitFile.path],
             stdin: Data("\(passphrase)\n".utf8),
             removingEnvironment: askpassVariables

@@ -95,6 +95,80 @@ public enum Command {
     }
 }
 
+extension Command {
+    /// Runs a tool in a new session with no controlling terminal.
+    ///
+    /// ssh-keygen reads passphrases from /dev/tty whenever a terminal exists,
+    /// ignoring stdin. Without a controlling terminal it falls back to stdin,
+    /// which is how the passphrase is handed over without echoing it or putting
+    /// it on a command line.
+    public static func runWithoutTerminal(
+        _ executable: String,
+        _ arguments: [String],
+        stdin: Data,
+        removingEnvironment: Set<String> = []
+    ) throws -> CommandResult {
+        var inputPipe: [Int32] = [0, 0], outputPipe: [Int32] = [0, 0], errorPipe: [Int32] = [0, 0]
+        guard pipe(&inputPipe) == 0, pipe(&outputPipe) == 0, pipe(&errorPipe) == 0 else {
+            throw CommandError.launchFailed(executable, "pipe: \(String(cString: strerror(errno)))")
+        }
+
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_adddup2(&actions, inputPipe[0], STDIN_FILENO)
+        posix_spawn_file_actions_adddup2(&actions, outputPipe[1], STDOUT_FILENO)
+        posix_spawn_file_actions_adddup2(&actions, errorPipe[1], STDERR_FILENO)
+        for fd in inputPipe + outputPipe + errorPipe {
+            posix_spawn_file_actions_addclose(&actions, fd)
+        }
+
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT))
+
+        let environment = ProcessInfo.processInfo.environment
+            .filter { !removingEnvironment.contains($0.key) }
+            .map { "\($0.key)=\($0.value)" }
+        var argv = ([executable] + arguments).map { strdup($0) } + [nil]
+        var envp = environment.map { strdup($0) } + [nil]
+        defer {
+            argv.forEach { free($0) }
+            envp.forEach { free($0) }
+        }
+
+        var pid: pid_t = 0
+        let spawned = posix_spawn(&pid, executable, &actions, &attributes, &argv, &envp)
+        close(inputPipe[0])
+        close(outputPipe[1])
+        close(errorPipe[1])
+        guard spawned == 0 else {
+            close(inputPipe[1]); close(outputPipe[0]); close(errorPipe[0])
+            throw CommandError.launchFailed(executable, String(cString: strerror(spawned)))
+        }
+
+        let stdoutReader = FileHandle(fileDescriptor: outputPipe[0], closeOnDealloc: true)
+        let stderrReader = FileHandle(fileDescriptor: errorPipe[0], closeOnDealloc: true)
+        var stdoutData = Data()
+        var stderrData = Data()
+        let group = DispatchGroup()
+        DispatchQueue.global().async(group: group) { stdoutData = stdoutReader.readDataToEndOfFile() }
+        DispatchQueue.global().async(group: group) { stderrData = stderrReader.readDataToEndOfFile() }
+
+        let writer = FileHandle(fileDescriptor: inputPipe[1], closeOnDealloc: true)
+        signal(SIGPIPE, SIG_IGN)
+        try? writer.write(contentsOf: stdin)
+        try? writer.close()
+
+        var status: Int32 = 0
+        while waitpid(pid, &status, 0) < 0, errno == EINTR {}
+        group.wait()
+        let exitCode = (status & 0x7f) == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
+        return CommandResult(status: exitCode, stdout: stdoutData, stderr: stderrData)
+    }
+}
+
 /// File helpers shared by the identity, kit and inventory code.
 public enum SecureFile {
     /// Overwrites a file with zeros, then removes it. Best effort only: APFS
