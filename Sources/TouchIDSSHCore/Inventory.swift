@@ -114,6 +114,9 @@ public enum InventoryBackup {
 
     public enum Outcome: Equatable {
         case written(URL)
+        /// A backup already exists and this Mac's inventory is empty (a new
+        /// Mac, or a fresh setup), so the existing file was left untouched.
+        case keptExisting(URL)
         case noBackupFolder
         case noRecoveryKey
         case ageMissing
@@ -136,8 +139,14 @@ public enum InventoryBackup {
             if !FileManager.default.fileExists(atPath: folder.path) {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
             }
-            let plaintext = try JSON.encode(try InventoryStore.load(from: paths))
+            let inventory = try InventoryStore.load(from: paths)
             let target = folder.appendingPathComponent(fileName)
+            // Never replace an existing backup with an empty list: on a new Mac
+            // that backup is the only copy of the server list.
+            if inventory.servers.isEmpty, FileManager.default.fileExists(atPath: target.path) {
+                return .keptExisting(target)
+            }
+            let plaintext = try JSON.encode(inventory)
             let temporary = folder.appendingPathComponent(".\(fileName).\(UUID().uuidString).tmp")
             let result = try Command.run(
                 age, ["-R", paths.recoveryPublicKeyFile.path, "-o", temporary.path],

@@ -52,6 +52,12 @@ func reportBackup(_ outcome: InventoryBackup.Outcome, paths: AgentPaths) {
     switch outcome {
     case .written(let file):
         Out.say("Encrypted inventory saved to \(paths.displayPath(file)).")
+    case .keptExisting(let file):
+        Out.say("""
+        Kept the existing \(paths.displayPath(file)): this Mac's inventory is empty,
+        so it was not overwritten. If you are recovering from a lost Mac, run
+        `\(tool) recover emergency-kit.txt`.
+        """)
     case .noBackupFolder:
         Out.say("Warning: no backup folder, so the inventory only lives on this Mac. Set one with `\(tool) set backup-path DIR`.")
     case .noRecoveryKey:
