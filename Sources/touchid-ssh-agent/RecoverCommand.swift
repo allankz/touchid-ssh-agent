@@ -130,7 +130,7 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
     let reachable = emergencyLogins(old, agent: agent, configFile: options.configFile)
     let unreachable = reachable.filter { !$0 }.count
     guard unreachable < old.servers.count else {
-        throw UsageError(description: "no server accepted this kit's key, so nothing was changed.")
+        throw UsageError(description: "no server accepted this kit's key, so no server was changed.")
     }
     if unreachable > 0 {
         Out.say("\n  \(unreachable) server\(unreachable == 1 ? "" : "s") did not accept this kit's key and will be left as \(unreachable == 1 ? "it is" : "they are").")
@@ -310,7 +310,7 @@ func askReplaceEmergencyKey(_ key: RecoveryKey) throws -> Bool {
         if ["", "y", "yes"].contains(answer) { return true }
         if ["n", "no"].contains(answer) { return false }
     }
-    throw UsageError(description: "no answer, so nothing was changed.")
+    throw UsageError(description: "no answer, so no server was changed.")
 }
 
 /// Moves one server to this Mac. The old keys are removed only after the new
