@@ -1286,6 +1286,41 @@ if runDocker {
         let kept = ((try? FileManager.default.contentsOfDirectory(atPath: recCloud.path)) ?? []).filter { $0.hasPrefix("inventory-before-recovery-") }
         check(kept.count == 1, "previous backup preserved: \(kept)")
     }
+
+    test("recover --keep-emergency-key on a Mac with no emergency key keeps the kit's key") {
+        // The server now trusts the previous test's Mac and "new-emergency" (an
+        // unencrypted kit, so no passphrase prompts). A newer Mac takes over.
+        let kit = work.appendingPathComponent("new-emergency-kit.txt")
+        let before = try? Inventory.decode(Data(try run(agePath ?? "age", ["-d", "-i", kit.path, recBackup.path]).stdout.utf8))
+        let previousFingerprint = before?.servers.first?.loginKeyFingerprint
+        check(previousFingerprint != nil, "backup lists the previous Mac's key")
+        let newer = try LiveAgent.start()
+        defer { newer.stop() }
+        try SettingsStore.save(AgentSettings(backupPath: recCloud.path), to: newer.paths)
+        let result = try expectScript(#"""
+        set timeout 180
+        spawn $env(CLI) recover $env(KIT) --inventory $env(INV) -F $env(CFG) --keep-emergency-key
+        expect {
+          "Type RECOVER" { send -- "RECOVER\r"; exp_continue }
+          "or Enter to skip" { send -- "\r"; exp_continue }
+          "Add it to" { send -- "n\r"; exp_continue }
+          "Add them?" { send -- "n\r"; exp_continue }
+          "Retype the passphrase" { puts "\nRESULT=asked-for-new-kit"; exit 4 }
+          timeout { puts "\nRESULT=hung"; exit 3 }
+          eof
+        }
+        catch wait result
+        puts "\nEXIT=[lindex $result 3]"
+        """#, paths: newer.paths, extra: ["KIT": kit.path, "INV": recBackup.path, "CFG": newConfig.path], in: work)
+        check(result.stdout.contains("EXIT=0"), "recover succeeded without a new kit: \(result.stdout.suffix(600))")
+        let kitKey = try RecoveryStore.load(from: newer.paths)
+        check(kitKey?.blob == (try? RecoveryKey(line: try String(contentsOf: work.appendingPathComponent("new-emergency.pub"), encoding: .utf8)))?.blob,
+              "the kit's key is this Mac's emergency key")
+        let blobs = try recServerBlobs()
+        check(blobs.contains(newer.identity.publicKeyBlob), "newer Mac's key installed")
+        check(kitKey.map { blobs.contains($0.blob) } == true, "kept emergency key still on the server")
+        check(!blobs.contains { SSHKeyFormat.fingerprint(blob: $0) == previousFingerprint }, "previous Mac's key removed")
+    }
 } else {
     print("(real Docker login skipped; use --docker)")
 }
