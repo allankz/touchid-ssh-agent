@@ -39,21 +39,19 @@ The words around the reason ("is trying to") come from macOS in the system langu
 
 - A Mac with Touch ID (Apple Silicon or T2) running macOS 13 or later.
 - Swift 5.10 or later. The Command Line Tools are enough: `xcode-select --install`.
+- [age](https://age-encryption.org) for the encrypted inventory backup: `brew install age`.
 
 ## Installation
 
 ```bash
-make install                       # builds and copies to ~/.local/bin
-touchid-ssh-agent create           # creates the identity in the Secure Enclave
-touchid-ssh-agent install          # registers the LaunchAgent (starts with your session)
+make install                        # builds and copies to ~/.local/bin
+touchid-ssh-agent setup             # Touch ID key, cloud backup folder, emergency kit
+touchid-ssh-agent install           # registers the LaunchAgent (starts with your session)
+touchid-ssh-agent authorize user@server -p 22
 touchid-ssh-agent status
 ```
 
-`create` prints the public key. Add it to the server **using an access method that already works**:
-
-```bash
-ssh-copy-id -f -i ~/.touchid-ssh-agent/id_ecdsa_se.pub user@server
-```
+`authorize` connects **with the access that already works** (a password or another key), adds both the Touch ID key and the emergency key to the server's `authorized_keys`, checks that the Touch ID key logs in, and records the server in the inventory. If your current access needs extra ssh options, pass them after `--`, for example `-- -i ~/.ssh/old_key`.
 
 Generate the `~/.ssh/config` block. The command only prints it and changes no file:
 
@@ -89,13 +87,43 @@ git config --global user.signingkey ~/.touchid-ssh-agent/id_ecdsa_se.pub
 git config --global commit.gpgsign true
 ```
 
+## Emergency kit and inventory
+
+The Touch ID key cannot leave this Mac. If the Mac is lost, stolen or broken, or if your fingerprints change under the `current-set` policy, that key is gone. The emergency kit is how you get back in.
+
+- **The kit is one file**: a passphrase-protected Ed25519 SSH key, followed by recovery instructions. `ssh -i` and `age -i` accept the file as it is.
+- **`setup` shows a random passphrase once** and asks you to retype it, then reveals the kit in Finder. Store the kit outside this Mac (password manager, encrypted drive), preferably apart from the passphrase. Once you type `SAVED`, the copy on the Mac is erased and only the public key stays.
+- **Every `authorize` installs both keys.** The emergency key is never left out.
+- **The inventory** (`~/.touchid-ssh-agent/inventory.json`) lists every authorized server. A copy, `inventory.age`, goes to the backup folder you chose, ideally one synced to the cloud. It is encrypted with age to the emergency key, so this Mac can update it but only the kit can read it. If the Mac is stolen, that copy is how you find your servers again.
+- **`audit`** logs in to every server in the inventory (one Touch ID each) and checks that both keys are still there.
+
+Already have an emergency key, for example one kept in your password manager? Import its public half with `touchid-ssh-agent recovery import key.pub` (ed25519 or rsa). Change the backup folder at any time with `touchid-ssh-agent set backup-path DIR`.
+
+### If the Mac is gone
+
+From any computer with OpenSSH and age:
+
+```bash
+chmod 600 emergency-kit.txt
+age -d -i emergency-kit.txt inventory.age     # server list; asks for the passphrase
+ssh -i emergency-kit.txt -p PORT USER@HOST    # asks for the passphrase
+```
+
+Then remove the lost Mac's login key from each server (`ssh-keygen -lf ~/.ssh/authorized_keys` shows each line's fingerprint), set up the new Mac, `authorize` every server again, and retire the emergency key you used. The same steps are written inside the kit.
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `create [--comment T] [--biometry current-set\|any]` | Creates the identity. Refuses if one already exists. |
+| `setup [--biometry current-set\|any] [--comment T]` | Guided setup: Touch ID key, backup folder, emergency kit. |
+| `authorize [user@]host [-p P] [-F FILE] [--alias A] [-- SSH_ARGS]` | Installs both keys, checks the Touch ID login, updates the inventory and its backup. |
+| `audit [ALIAS...]` / `inventory` | Checks or lists the servers in the inventory. |
+| `set backup-path DIR\|none` | Sets or clears the backup folder for `inventory.age`. |
+| `recovery create [--replace] [--own-passphrase]` | Creates a new emergency kit. |
+| `recovery import FILE.pub [--replace]` / `recovery pubkey` | Uses an existing emergency key / prints the emergency public key. |
+| `create [--comment T] [--biometry current-set\|any]` | Creates only the Touch ID key. Refuses if one already exists. |
 | `pubkey` / `fingerprint` | Prints the public key or its SHA256 fingerprint. |
-| `status` | Secure Enclave, Touch ID (including password lockout), identity, agent and LaunchAgent. |
+| `status` | Secure Enclave, Touch ID (including password lockout), identity, agent, LaunchAgent, emergency key, backup folder and FileVault. |
 | `config ALIAS --host H [--user U] [--port P]` | Prints the `ssh_config` block. |
 | `agent` | Runs the agent in the foreground (useful for debugging). |
 | `install [--force]` / `uninstall` | Registers or removes the `local.touchid-ssh-agent` LaunchAgent. |
@@ -133,14 +161,15 @@ See [`SECURITY.md`](SECURITY.md) for the threat model and how to report a vulner
 
 ## Recovery
 
-The key is tied to **this** Mac and, with the `current-set` policy, to the current fingerprints. It is gone if you change Macs, if the Mac fails, if the fingerprints change, or if you run `delete`. So:
+The Touch ID key is tied to **this** Mac and, with the `current-set` policy, to the current fingerprints. It is gone if you change Macs, if the Mac fails, if the fingerprints change, or if you run `delete`. So:
 
-1. Keep an **independent recovery key** on the server, ideally a backup FIDO2 key or a key stored offline.
-2. To move to a new Mac: create the identity on the new Mac, add its public key to the server, test the login in a second session, and only then remove the old line from `authorized_keys`.
-3. Record in your inventory: alias, fingerprint, device, creation date and revocation date.
+1. Keep the **emergency kit** outside the Mac and make sure every server has the emergency key (`audit`). See [Emergency kit and inventory](#emergency-kit-and-inventory).
+2. Test the kit from another computer now and then. A kit nobody has tried is a hope, not a plan.
+3. To move to a new Mac: run `setup` on the new Mac, `authorize` every server from it, test the login in a second session, and only then remove the old Mac's line from `authorized_keys`.
 
 ## Roadmap
 
+- **Phase 1.5: emergency kit and inventory.** Done; design notes in [`docs/phase-1.5-emergency-kit.md`](docs/phase-1.5-emergency-kit.md).
 - **Phase 2: temporary credentials for agents (overnight use).** One Touch ID before bed issues an SSH certificate valid for a few hours, with a restricted scope, signed by a CA kept in the Secure Enclave. The login key keeps asking for Touch ID on every use. Design in [`docs/phase-2-temporary-credentials.md`](docs/phase-2-temporary-credentials.md). Not implemented yet.
 - A menu bar app (SwiftUI) for status, identity creation and history. Requires Xcode.
 
@@ -152,7 +181,7 @@ make test-docker   # adds a real SSH login against an sshd container
 make test-touchid  # interactive: approve, deny and time out real Touch ID prompts, with the agent under launchd
 ```
 
-The tests create Secure Enclave keys **without** Touch ID, only in temporary directories. That API is `@_spi(Testing)`, refuses the default directory and is not reachable from the CLI. The Mac must stay unlocked while the tests run.
+The interactive commands (`setup`, `recovery create`) are driven through a real pseudo-terminal with `expect`. The tests create Secure Enclave keys **without** Touch ID, only in temporary directories. That API is `@_spi(Testing)`, refuses the default directory and is not reachable from the CLI. The Mac must stay unlocked while the tests run.
 
 Layout:
 
@@ -160,7 +189,7 @@ Layout:
 - `Sources/touchid-ssh-agent/`: CLI.
 - `Tests/SelfTest/`: test suite (an executable, because XCTest does not ship with the Command Line Tools).
 - `Tests/e2e/`: `sshd` image used by the end-to-end test.
-- `docs/`: design of upcoming phases.
+- `docs/`: design notes for each phase.
 
 ### Why a file and not the Keychain
 

@@ -1,6 +1,6 @@
 # Phase 2: temporary credentials for agents (overnight use)
 
-> Status: **design approved, not implemented**. Prerequisites: Phase 1 validated with real Touch ID (`make test-touchid`) and installed on the Mac.
+> Status: **design approved, not implemented**. Prerequisites: Phase 1 validated with real Touch ID (`make test-touchid`) and installed on the Mac; Phase 1.5 (emergency kit and inventory) in place, since the CA line is added to the same servers.
 
 ## Problem
 

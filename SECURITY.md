@@ -1,6 +1,6 @@
 # Security Policy
 
-touchid-ssh-agent is experimental software (0.1.x) and has not been independently audited. Keep an independent recovery key on every server you protect with it.
+touchid-ssh-agent is experimental software (0.1.x) and has not been independently audited. Keep the emergency key installed on every server you protect with it (`touchid-ssh-agent audit`).
 
 ## Supported versions
 
@@ -30,6 +30,8 @@ This is a personal project maintained on a best-effort basis. The goals are to a
 - **Silent use by local software**, including AI agents. Any process of the user can *request* a signature, but only a fingerprint can *approve* it.
 - **Other local users.** The socket is `0600` inside a `0700` directory, and the agent rejects peers whose UID differs from its own.
 - **Moving the key to another Mac.** The blob is bound to this device and `WhenUnlockedThisDeviceOnly`.
+- **Being locked out when the Mac is gone.** The emergency kit and the encrypted inventory backup let you find and reach your servers from any computer.
+- **Reading the server list from the cloud.** `inventory.age` is encrypted with age to the emergency key; the backup folder's README names no server.
 
 ### What it does not protect against
 
@@ -37,7 +39,9 @@ This is a personal project maintained on a best-effort basis. The goals are to a
 - **root or kernel compromise** of the Mac.
 - **Compromised servers**, or agent forwarding to them. Keep `ForwardAgent` off.
 - **Destination checks without `publickey-hostbound`.** For older servers the agent cannot know where a signature will be used. The process chain shown in the prompt is informational and can be stale.
-- **Loss of availability.** The key is gone if the Mac fails, if fingerprints change under the `current-set` policy, or after `delete`.
+- **Loss of availability.** The Touch ID key is gone if the Mac fails, if fingerprints change under the `current-set` policy, or after `delete`. The emergency kit covers this only if it was stored outside the Mac.
+- **Theft of the emergency kit together with its passphrase.** The emergency key is a regular software key: whoever has the kit and the passphrase can log in to every server that trusts it, without Touch ID. Its protection is the passphrase (about 119 bits when generated, bcrypt KDF with 200 rounds) and keeping the kit off the Mac, ideally apart from the passphrase.
+- **Reading the local inventory on a stolen Mac.** `inventory.json` is plain JSON (mode `0600`) so the agent can use it without a passphrase. FileVault protects it at rest; `status` warns when FileVault is off.
 
 ## Security design
 
@@ -49,6 +53,10 @@ This is a personal project maintained on a best-effort basis. The goals are to a
 - **Untrusted text**: user names, namespaces, host names and process names are stripped of control characters and truncated before they reach the prompt or the log.
 - **Logs**: time, event, process chain and outcome only. No key material, payloads, remote user names or hosts.
 - **Test-only keys**: keys without Touch ID can only be created through `@_spi(Testing)` API, which refuses the default directory and is not reachable from the CLI.
+- **Emergency kit**: `ssh-keygen` generates the key in a new session without a controlling terminal, with the passphrase written to its stdin. The passphrase never appears on a command line or in the environment, and askpass variables are removed. The kit must open with the passphrase (`ssh-keygen -y`) before it is shown to the user. It is erased from the Mac once the user confirms it was saved, and only the public key is kept.
+- **Imports**: `recovery import` accepts only ed25519 or rsa public keys and refuses private keys.
+- **Inventory backup**: `age -R recovery.pub`, with the plaintext piped through stdin (never written to a temporary file) and the result moved into place atomically. Replacing the emergency key re-encrypts the backup for the new key.
+- **authorize and audit**: keys are appended by a small POSIX `sh` script that matches existing keys by blob, fixes a missing final newline and quotes only a restricted character set. The Touch ID check disables connection sharing (`ControlPath=none`), uses `BatchMode`, and confirms from `ssh -v` that the server accepted the Touch ID key's fingerprint, so another configured key cannot pass for it.
 
 ## Scope
 
@@ -58,6 +66,7 @@ In scope:
 - crashes, hangs or memory-safety issues triggered through the socket;
 - access to the agent from another local user;
 - sensitive data reaching the log;
+- the emergency key, its passphrase or the plaintext inventory left on disk or exposed to other processes;
 - a prompt that misdescribes a request beyond the limitations documented here and in the README.
 
 Out of scope:
