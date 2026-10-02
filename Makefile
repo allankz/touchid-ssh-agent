@@ -1,7 +1,7 @@
 PREFIX ?= $(HOME)/.local
 BINARY := touchid-ssh-agent
 
-.PHONY: build test test-docker test-touchid install uninstall clean
+.PHONY: build test test-docker test-touchid install uninstall clean age
 
 build:
 	swift build -c release --product $(BINARY)
@@ -24,10 +24,23 @@ test-touchid: build
 
 # Copies the binary to $(PREFIX)/bin. Register the agent afterwards with
 # `$(PREFIX)/bin/touchid-ssh-agent install`.
-install: build
+install: build age
 	install -d "$(PREFIX)/bin"
 	install -m 0755 ".build/release/$(BINARY)" "$(PREFIX)/bin/$(BINARY)"
 	@echo "Installed at $(PREFIX)/bin/$(BINARY)"
+
+# age encrypts the inventory backup. Installed with Homebrew when missing;
+# without Homebrew, only a warning (the agent itself works without age).
+age:
+	@if command -v age >/dev/null 2>&1; then \
+		echo "age: $$(command -v age)"; \
+	elif command -v brew >/dev/null 2>&1; then \
+		echo "Installing age with Homebrew (needed for the inventory backup)..."; \
+		brew install age; \
+	else \
+		echo "Warning: age is not installed and Homebrew was not found."; \
+		echo "Install age (https://age-encryption.org) so the inventory backup can be written."; \
+	fi
 
 uninstall:
 	-"$(PREFIX)/bin/$(BINARY)" uninstall
