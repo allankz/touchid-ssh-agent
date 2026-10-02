@@ -17,9 +17,16 @@ var failed: [String] = []
 var currentTest = ""
 
 func check(_ condition: @autoclosure () throws -> Bool, _ message: String, line: Int = #line) {
-    if (try? condition()) != true {
-        failed.append("\(currentTest): \(message) (line \(line))")
-        print("    ✗ \(message) (line \(line))")
+    var passedCheck = false
+    var detail = ""
+    do {
+        passedCheck = try condition()
+    } catch {
+        detail = " — threw: \(error)"
+    }
+    if !passedCheck {
+        failed.append("\(currentTest): \(message)\(detail) (line \(line))")
+        print("    ✗ \(message)\(detail) (line \(line))")
     }
 }
 
@@ -279,6 +286,178 @@ test("process chain of the test itself") {
     let chain = PeerInspector.processChain(from: getpid())
     check(chain.first?.pid == getpid(), "starts at this process")
     check(chain.first?.name.contains("selftest") == true, "name: \(chain.first?.name ?? "-")")
+}
+
+test("safe comments keep shell-safe characters only") {
+    check(RemoteKeys.safeComment("touchid-recovery@mac") == "touchid-recovery@mac", "kept")
+    check(RemoteKeys.safeComment("a'b; rm -rf /") == "a-b--rm--rf--", "quotes, spaces and slashes replaced")
+    check(RemoteKeys.safeComment("") == "key", "empty")
+    check(RemoteKeys.safeComment(String(repeating: "x", count: 200)).count == 80, "truncated")
+}
+
+test("install script appends each key once and reports through markers") {
+    let login = AuthorizedKey(label: "login", type: SSHKeyFormat.keyType,
+                              blob: SSHKeyFormat.publicKeyBlob(P256.Signing.PrivateKey().publicKey), comment: "me@mac")
+    let recovery = AuthorizedKey(label: "recovery", type: "ssh-ed25519", blob: Data([1, 2, 3]), comment: "it's me")
+    let script = RemoteKeys.installScript([login, recovery])
+    check(script.contains("grep -qF '\(login.base64)'"), "login idempotency check")
+    check(script.contains("printf '%s\\n' '\(recovery.line)'"), "recovery line appended")
+    check(recovery.comment == "it-s-me", "comment sanitized before quoting")
+    check(script.contains("tail -c 1"), "fixes a missing final newline")
+    let report = RemoteKeys.parse("Welcome!\nTOUCHID-SSH-AGENT added login\nnoise TOUCHID-SSH-AGENT x\nTOUCHID-SSH-AGENT present recovery\n")
+    check(report == ["login": "added", "recovery": "present"], "parse ignores shell noise: \(report)")
+}
+
+test("generated passphrases: 6 groups of 4 unambiguous characters") {
+    var seen = Set<String>()
+    for _ in 0..<200 {
+        let passphrase = Passphrase.generate()
+        let groups = passphrase.split(separator: "-")
+        check(groups.count == 6 && groups.allSatisfy { $0.count == 4 }, "shape: \(passphrase)")
+        check(passphrase.allSatisfy { $0 == "-" || Passphrase.alphabet.contains($0) }, "alphabet: \(passphrase)")
+        seen.insert(passphrase)
+    }
+    check(seen.count == 200, "no repeats")
+}
+
+test("emergency public keys: ed25519 and rsa only, never a private key") {
+    let directory = try makeTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    for type in ["ed25519", "rsa", "ecdsa"] {
+        let file = directory.appendingPathComponent(type)
+        try run("/usr/bin/ssh-keygen", ["-q", "-t", type, "-N", "", "-C", "old key", "-f", file.path])
+        let line = try String(contentsOf: file.appendingPathExtension("pub"), encoding: .utf8)
+        if type == "ecdsa" {
+            check(throwsError { _ = try RecoveryKey(line: line) }, "ecdsa rejected")
+        } else {
+            let key = try RecoveryKey(line: line)
+            let listed = try run("/usr/bin/ssh-keygen", ["-lf", file.appendingPathExtension("pub").path]).stdout
+            check(listed.contains(key.fingerprint), "\(type) fingerprint matches ssh-keygen")
+            check(key.comment == "old-key", "\(type) comment sanitized")
+        }
+        check(throwsError { _ = try RecoveryKey(line: try String(contentsOf: file, encoding: .utf8)) }, "\(type) private key rejected")
+    }
+    let ed = try String(contentsOf: directory.appendingPathComponent("ed25519.pub"), encoding: .utf8)
+    check(throwsError { _ = try RecoveryKey(line: ed.replacingOccurrences(of: "ssh-ed25519", with: "ssh-rsa")) }, "type mismatch rejected")
+}
+
+test("inventory and settings: round trip, upsert by alias, mode 0600") {
+    let directory = try makeTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let paths = AgentPaths(directory: directory.appendingPathComponent("a"))
+    check(try InventoryStore.load(from: paths).servers.isEmpty, "missing file is an empty inventory")
+    var inventory = Inventory(mac: "test")
+    let entry = InventoryEntry(alias: "web", destination: "web", hostname: "server.example", user: "deploy", port: 22,
+                               sshConfigFile: nil, loginKeyFingerprint: "SHA256:a", recoveryKeyFingerprint: "SHA256:b",
+                               authorizedAt: Date(timeIntervalSince1970: 1_800_000_000))
+    inventory.upsert(entry)
+    var moved = entry
+    moved.port = 2222
+    inventory.upsert(moved)
+    check(inventory.servers.count == 1 && inventory.servers[0].port == 2222, "upsert replaces")
+    try InventoryStore.save(inventory, to: paths)
+    check(try InventoryStore.load(from: paths) == inventory, "round trip")
+    let mode = (try? FileManager.default.attributesOfItem(atPath: paths.inventoryFile.path))?[.posixPermissions] as? Int
+    check(mode == 0o600, "inventory 0600")
+
+    check(SettingsStore.load(from: paths) == AgentSettings(), "default settings")
+    try SettingsStore.save(AgentSettings(backupPath: "/tmp/x"), to: paths)
+    check(SettingsStore.load(from: paths).backupPath == "/tmp/x", "settings round trip")
+}
+
+// MARK: - Emergency kit and inventory backup
+
+print("Emergency kit and inventory backup")
+
+let agePath = Command.find("age")
+
+test("emergency kit: opens with the passphrase, instructions after the key, nothing left behind") {
+    let directory = try makeTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let paths = AgentPaths(directory: directory.appendingPathComponent("a"))
+    let passphrase = Passphrase.generate()
+    let details = EmergencyKitBuilder.Details(macName: "testmac", loginKeyFingerprint: "SHA256:login",
+                                              backupFolder: "~/Library/Mobile Documents/backup")
+    let kit = try EmergencyKitBuilder.build(passphrase: passphrase, details: details, paths: paths)
+    let text = try String(contentsOf: kit.file, encoding: .utf8)
+    // Markers built in pieces so secret scanners do not flag this test.
+    let pemLabel = "OPENSSH " + "PRIVATE KEY-----"
+    check(text.hasPrefix("-----BEGIN " + pemLabel), "key block first")
+    let afterKey = text.components(separatedBy: "-----END " + pemLabel).last ?? ""
+    check(afterKey.contains("EMERGENCY KIT") && afterKey.contains(kit.recoveryKey.fingerprint), "instructions after the key")
+    check(afterKey.contains("SHA256:login") && afterKey.contains("Mobile Documents/backup/inventory.age"), "fingerprints and backup folder")
+    check(kit.recoveryKey.comment == "touchid-recovery@testmac", "key comment: \(kit.recoveryKey.comment)")
+    let mode = (try? FileManager.default.attributesOfItem(atPath: kit.file.path))?[.posixPermissions] as? Int
+    check(mode == 0o600, "kit 0600")
+    check((try? FileManager.default.contentsOfDirectory(atPath: paths.kitDirectory.path)) == [EmergencyKitBuilder.kitFileName]
+          || (try? FileManager.default.contentsOfDirectory(atPath: paths.kitDirectory.path).sorted()) == [EmergencyKitBuilder.kitFileName],
+          "only the kit file, no raw key: \((try? FileManager.default.contentsOfDirectory(atPath: paths.kitDirectory.path)) ?? [])")
+
+    check((try? EmergencyKitBuilder.verify(kitFile: kit.file, passphrase: passphrase, expected: kit.recoveryKey)) != nil, "right passphrase opens it")
+    check(throwsError { try EmergencyKitBuilder.verify(kitFile: kit.file, passphrase: "wrong", expected: kit.recoveryKey) }, "wrong passphrase fails")
+    check(throwsError { try EmergencyKitBuilder.verify(kitFile: kit.file, passphrase: passphrase.uppercased(), expected: kit.recoveryKey) },
+          "passphrase is exact")
+
+    try EmergencyKitBuilder.finalize(kit, paths: paths, replace: false)
+    check(!FileManager.default.fileExists(atPath: paths.kitDirectory.path), "kit scratch directory erased")
+    check(try RecoveryStore.load(from: paths) == kit.recoveryKey, "recovery.pub installed")
+    check(throwsError { try RecoveryStore.install(kit.recoveryKey, in: paths, replace: false) }, "refuses to replace without --replace")
+}
+
+/// An unencrypted ed25519 key wrapped like a kit (key block, then text), so
+/// tests can decrypt and log in without typing a passphrase.
+func plainKit(in directory: URL, name: String) throws -> (kit: URL, publicKey: URL) {
+    let key = directory.appendingPathComponent(name)
+    try run("/usr/bin/ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", name, "-f", key.path])
+    let kit = directory.appendingPathComponent("\(name)-kit.txt")
+    try (try String(contentsOf: key, encoding: .utf8) + "\nTOUCHID-SSH-AGENT EMERGENCY KIT\ntext after the key\n")
+        .write(to: kit, atomically: true, encoding: .utf8)
+    chmod(kit.path, 0o600)
+    return (kit, key.appendingPathExtension("pub"))
+}
+
+test("inventory backup: age decrypts it with the kit, other keys cannot, re-encrypted on key change") {
+    guard let age = agePath else {
+        check(false, "age is not installed (brew install age)")
+        return
+    }
+    let directory = try makeTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let paths = AgentPaths(directory: directory.appendingPathComponent("a"))
+    let folder = directory.appendingPathComponent("cloud folder")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+    let settings = AgentSettings(backupPath: folder.path)
+
+    check(InventoryBackup.export(paths: paths, settings: AgentSettings()) == .noBackupFolder, "no folder")
+    check(InventoryBackup.export(paths: paths, settings: settings) == .noRecoveryKey, "no emergency key")
+
+    let first = try plainKit(in: directory, name: "first")
+    let second = try plainKit(in: directory, name: "second")
+    try RecoveryStore.importPublicKey(from: first.publicKey, into: paths, replace: false)
+    var inventory = Inventory(mac: "test")
+    inventory.upsert(InventoryEntry(alias: "web", destination: "web", hostname: "server.example", user: "deploy", port: 22,
+                                    sshConfigFile: nil, loginKeyFingerprint: "SHA256:a", recoveryKeyFingerprint: "SHA256:b",
+                                    authorizedAt: Date()))
+    try InventoryStore.save(inventory, to: paths)
+
+    let outcome = InventoryBackup.export(paths: paths, settings: settings)
+    let backup = folder.appendingPathComponent(InventoryBackup.fileName)
+    check(outcome == .written(backup), "written: \(outcome)")
+    let raw = (try? Data(contentsOf: backup)) ?? Data()
+    check(!String(decoding: raw, as: UTF8.self).contains("server.example"), "encrypted at rest")
+    let decrypted = try run(age, ["-d", "-i", first.kit.path, backup.path])
+    check(decrypted.status == 0 && decrypted.stdout.contains("server.example"), "the kit decrypts it: \(decrypted.stderr)")
+    check(try run(age, ["-d", "-i", second.kit.path, backup.path]).status != 0, "another key cannot")
+    let readme = (try? String(contentsOf: folder.appendingPathComponent(InventoryBackup.readmeName), encoding: .utf8)) ?? ""
+    check(readme.contains("age -d -i emergency-kit.txt inventory.age") && !readme.contains("server.example"),
+          "README explains decryption and names no server")
+
+    try RecoveryStore.importPublicKey(from: second.publicKey, into: paths, replace: true)
+    InventoryBackup.export(paths: paths, settings: settings)
+    check(try run(age, ["-d", "-i", second.kit.path, backup.path]).status == 0, "new kit decrypts the re-exported backup")
+    check(try run(age, ["-d", "-i", first.kit.path, backup.path]).status != 0, "old kit no longer does")
+    let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+    check(leftovers.sorted() == [InventoryBackup.readmeName, InventoryBackup.fileName].sorted(), "no temp files: \(leftovers)")
 }
 
 // MARK: - Secure Enclave identity and live agent
@@ -561,6 +740,104 @@ if runDocker {
         check(result.status != 0, "ssh should fail")
         check(!result.stdout.contains("should-not-run"), "no command ran")
         check(denying.recorder.reasons.count == 1, "a single prompt, denied")
+    }
+
+    // authorize / audit against a server that starts with a bootstrap key only.
+    let work = try makeTempDirectory()
+    let bootstrap = work.appendingPathComponent("bootstrap")
+    try run("/usr/bin/ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "bootstrap", "-f", bootstrap.path])
+    let bootstrapLine = try String(contentsOf: bootstrap.appendingPathExtension("pub"), encoding: .utf8)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    let recoveryKit = try plainKit(in: work, name: "recovery")
+    try RecoveryStore.importPublicKey(from: recoveryKit.publicKey, into: approving.paths, replace: false)
+    let recoveryKey = try RecoveryStore.load(from: approving.paths)!
+    let keys = [AuthorizedKey.login(approving.identity), AuthorizedKey.recovery(recoveryKey)]
+
+    var authContainer: String?
+    defer {
+        if let authContainer { _ = try? run(docker, ["rm", "-f", authContainer]) }
+        try? FileManager.default.removeItem(at: work)
+    }
+    let config = work.appendingPathComponent("ssh_config")
+    let target = SSHTarget(destination: "e2e", configFile: config.path)
+    var authPort = ""
+
+    /// Runs a script on the server with the bootstrap key, independent of the agent.
+    func onServer(_ script: String) throws -> String {
+        try run("/usr/bin/ssh", ["-F", config.path, "-o", "IdentityAgent=none", "e2e", "sh -s"], stdin: Data(script.utf8)).stdout
+    }
+
+    test("authorize: server with a bootstrap key only, authorized_keys without a final newline") {
+        let started = try run(docker, ["run", "-d", "--rm", "-p", "127.0.0.1::22", "-e", "AUTHORIZED_KEYS=\(bootstrapLine)", image])
+        check(started.status == 0, "docker run: \(started.stderr)")
+        authContainer = started.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        authPort = try run(docker, ["port", authContainer ?? "", "22/tcp"]).stdout
+            .split(separator: "\n").first?.split(separator: ":").last.map(String.init) ?? ""
+        // Probe sparingly: OpenSSH 10 penalizes sources that connect without
+        // authenticating, and every container connection comes from Docker's NAT.
+        for _ in 0..<50 {
+            if (try? run("/usr/bin/nc", ["-z", "127.0.0.1", authPort]))?.status == 0 { break }
+            usleep(100_000)
+        }
+        usleep(500_000)
+        // The bootstrap key is a valid second identity on purpose: the Touch ID
+        // check must tell which key the server actually accepted.
+        try """
+        Host e2e
+          HostName 127.0.0.1
+          Port \(authPort)
+          User tester
+          IdentityFile \(bootstrap.path)
+          IdentitiesOnly yes
+          StrictHostKeyChecking no
+          UserKnownHostsFile \(work.appendingPathComponent("known_hosts").path)
+          LogLevel ERROR
+        """.write(to: config, atomically: true, encoding: .utf8)
+        _ = try onServer("f=$HOME/.ssh/authorized_keys; c=$(cat \"$f\"); printf '%s' \"$c\" > \"$f\"")
+        check(try onServer("tail -c 1 $HOME/.ssh/authorized_keys | od -An -c").contains("\\n") == false, "no final newline")
+    }
+
+    test("authorize: resolve, add both keys once, verify the Touch ID key") {
+        let resolved = try RemoteKeys.resolve(target)
+        check(resolved == ResolvedTarget(hostname: "127.0.0.1", user: "tester", port: Int(authPort) ?? 0), "ssh -G: \(resolved)")
+
+        check(try RemoteKeys.install(keys, on: target) == ["login": true, "recovery": true], "both added")
+        check(try RemoteKeys.install(keys, on: target) == ["login": false, "recovery": false], "second run adds nothing")
+        let lines = try onServer("cat $HOME/.ssh/authorized_keys").split(separator: "\n").map(String.init)
+        check(lines.count == 3, "three lines: \(lines)")
+        check(lines.first == bootstrapLine, "bootstrap line intact")
+        for key in keys {
+            check(lines.filter { $0.contains(key.base64) }.count == 1, "\(key.label) exactly once")
+        }
+
+        let before = approving.recorder.reasons.count
+        check(RemoteKeys.verifyLogin(on: target, paths: approving.paths, identity: approving.identity) == .ok,
+              "Touch ID key accepted although the bootstrap key would also work")
+        check(approving.recorder.reasons.count == before + 1, "exactly one Touch ID prompt")
+    }
+
+    test("emergency key logs in on its own") {
+        let result = try run("/usr/bin/ssh", [
+            "-F", "/dev/null", "-i", recoveryKit.kit.path, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+            "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=\(work.appendingPathComponent("known_hosts").path)",
+            "-p", authPort, "tester@127.0.0.1", "echo recovery-ok",
+        ])
+        check(result.status == 0 && result.stdout.contains("recovery-ok"), "kit file works with ssh -i: \(result.stderr)")
+    }
+
+    test("audit: both present, then a missing emergency key, then a missing login key") {
+        var outcome = RemoteKeys.audit(target, keys: keys, paths: approving.paths, identity: approving.identity)
+        check(outcome == AuditOutcome(login: .ok, present: ["login": true, "recovery": true]), "all good: \(outcome)")
+
+        _ = try onServer("f=$HOME/.ssh/authorized_keys; grep -vF '\(keys[1].base64)' \"$f\" > \"$f.new\"; mv \"$f.new\" \"$f\"")
+        outcome = RemoteKeys.audit(target, keys: keys, paths: approving.paths, identity: approving.identity)
+        check(outcome == AuditOutcome(login: .ok, present: ["login": true, "recovery": false]), "emergency key missing: \(outcome)")
+
+        _ = try onServer("f=$HOME/.ssh/authorized_keys; grep -vF '\(keys[0].base64)' \"$f\" > \"$f.new\"; mv \"$f.new\" \"$f\"")
+        outcome = RemoteKeys.audit(target, keys: keys, paths: approving.paths, identity: approving.identity)
+        check(outcome.login != .ok, "Touch ID key no longer logs in: \(outcome.login)")
+        check(outcome.present["login"] != true, "login key reported missing: \(outcome)")
     }
 } else {
     print("(real Docker login skipped; use --docker)")

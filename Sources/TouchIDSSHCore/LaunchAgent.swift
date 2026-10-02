@@ -60,20 +60,12 @@ public enum LaunchAgent {
     }
 
     static func launchctl(_ arguments: [String]) -> (status: Int32, output: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
         do {
-            try process.run()
+            let result = try Command.run("/bin/launchctl", arguments)
+            return (result.status, result.stdoutText + result.stderrText)
         } catch {
             return (-1, "\(error)")
         }
-        let output = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return (process.terminationStatus, String(decoding: output, as: UTF8.self))
     }
 }
 

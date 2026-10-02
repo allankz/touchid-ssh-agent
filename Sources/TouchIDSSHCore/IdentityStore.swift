@@ -58,6 +58,12 @@ public struct AgentPaths: Equatable {
     public var publicKeyFile: URL { directory.appendingPathComponent("id_ecdsa_se.pub") }
     public var socket: URL { directory.appendingPathComponent("agent.sock") }
     public var logFile: URL { directory.appendingPathComponent("agent.log") }
+    /// Public half of the emergency key. Its private half lives only in the kit.
+    public var recoveryPublicKeyFile: URL { directory.appendingPathComponent("recovery.pub") }
+    public var settingsFile: URL { directory.appendingPathComponent("config.json") }
+    public var inventoryFile: URL { directory.appendingPathComponent("inventory.json") }
+    /// Scratch space for building the emergency kit; erased once it is saved.
+    public var kitDirectory: URL { directory.appendingPathComponent("kit") }
 
     /// Path suitable for ssh_config, using `~` when inside the home directory.
     public func displayPath(_ url: URL) -> String {
@@ -124,11 +130,15 @@ public struct StoredIdentity {
 }
 
 public enum IdentityStore {
-    public static func defaultComment() -> String {
-        let host = ProcessInfo.processInfo.hostName
+    /// Short host name of this Mac, e.g. "studio" for "studio.local".
+    public static func macName() -> String {
+        ProcessInfo.processInfo.hostName
             .replacingOccurrences(of: ".local", with: "")
             .split(separator: ".").first.map(String.init) ?? "mac"
-        return "touchid-ssh-agent@\(host)"
+    }
+
+    public static func defaultComment() -> String {
+        "touchid-ssh-agent@\(macName())"
     }
 
     /// Creates a new Secure Enclave key protected by Touch ID. The key never
@@ -218,16 +228,9 @@ public enum IdentityStore {
     /// Deletes the identity. The Secure Enclave keeps no copy, so once the
     /// wrapped blob is gone the key is unrecoverable.
     public static func delete(from paths: AgentPaths) throws {
-        if let handle = FileHandle(forWritingAtPath: paths.keyFile.path) {
-            // Best effort only: APFS copy-on-write may keep old blocks around.
-            let size = (try? handle.seekToEnd()) ?? 0
-            try? handle.seek(toOffset: 0)
-            handle.write(Data(count: Int(size)))
-            try? handle.synchronize()
-            try? handle.close()
-        }
-        for file in [paths.keyFile, paths.publicKeyFile] where FileManager.default.fileExists(atPath: file.path) {
-            try FileManager.default.removeItem(at: file)
+        SecureFile.erase(paths.keyFile)
+        if FileManager.default.fileExists(atPath: paths.publicKeyFile.path) {
+            try FileManager.default.removeItem(at: paths.publicKeyFile)
         }
     }
 
