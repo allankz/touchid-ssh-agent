@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/banner.png" alt="Touch ID for SSH: a key locked in the Secure Enclave, a fingerprint approval and a server that accepts the login" width="720">
+</p>
+
 # Touch ID SSH Agent for macOS
 
 An SSH agent for macOS that keeps the key in the **Secure Enclave** and requires **Touch ID for every signature**. The `ssh` client stays the same, and the server only needs the public key in `authorized_keys`.
@@ -5,6 +9,10 @@ An SSH agent for macOS that keeps the key in the **Secure Enclave** and requires
 > Status: experimental (0.1.0). It does not replace an access recovery plan: always keep a second authorized key on the server (see [Recovery](#recovery)).
 
 ## How it works
+
+<p align="center">
+  <img src="docs/images/how-it-works.png" alt="1. Run ssh. 2. Touch to approve: the Secure Enclave signs and the private key never leaves it. 3. Logged in. Automations can ask, but only you approve. The inventory is backed up encrypted and the recovery kit stays offline." width="640">
+</p>
 
 ```text
 ssh (or git, or an AI agent running ssh)
