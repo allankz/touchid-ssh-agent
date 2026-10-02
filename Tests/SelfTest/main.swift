@@ -1095,6 +1095,15 @@ if runDocker {
         check(login.stdout.contains("friendly-ok"), "ssh e2e-friendly goes through the agent: \(login.stderr)")
         let audited = try run(cliBinary, ["audit", "e2e-friendly"], environment: [AgentPaths.environmentVariable: approving.paths.directory.path])
         check(audited.stdout.contains("`ssh e2e-friendly` uses the Touch ID agent"), "audit sees the ssh config: \(audited.stdout)")
+
+        // Authorizing the same server by address again reuses the alias instead of asking.
+        let again = try run(cliBinary, ["authorize", "tester@127.0.0.1", "-p", authPort, "-F", friendlyConfig.path,
+                                        "--", "-i", bootstrap.path, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none"],
+                            environment: [AgentPaths.environmentVariable: approving.paths.directory.path])
+        check(again.stdout.contains("`ssh e2e-friendly` already reaches this server"), "existing alias reused: \(again.stdout)")
+        check(try InventoryStore.load(from: approving.paths).servers.map(\.alias).contains("e2e-friendly"), "inventory keeps the alias")
+        let blocks = ((try? String(contentsOf: friendlyConfig, encoding: .utf8)) ?? "").components(separatedBy: "Host e2e-friendly").count - 1
+        check(blocks == 1, "no duplicate Host block: \(blocks)")
     }
 
     // Recovery: an "old Mac" authorizes a fresh server, then "new Macs" take it over.
