@@ -7,11 +7,14 @@ build:
 	swift build -c release --product $(BINARY)
 
 # Unit and integration tests (OpenSSH as oracle). Needs an unlocked Mac.
+# `swift build` first: the suite also drives the CLI binary.
 test:
+	swift build
 	swift run -q touchid-ssh-agent-selftest
 
 # Adds a real SSH login against a throwaway sshd container. Needs Docker.
 test-docker:
+	swift build
 	swift run -q touchid-ssh-agent-selftest --docker
 
 # Interactive: asks you to approve one Touch ID prompt and refuse another,

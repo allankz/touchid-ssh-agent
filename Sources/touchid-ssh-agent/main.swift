@@ -11,9 +11,23 @@ let usage = """
 \(tool) \(version) — SSH agent with a Secure Enclave key and Touch ID for every signature
 
 Usage:
+  \(tool) setup [--biometry current-set|any] [--comment TEXT]
+        Guided setup: Touch ID key, backup folder and emergency kit.
+  \(tool) authorize [user@]host [-p PORT] [-F SSH_CONFIG] [--alias NAME] [-- SSH_ARGS]
+        Installs the Touch ID key and the emergency key on a server, checks
+        the Touch ID login and updates the inventory and its backup.
+  \(tool) audit [ALIAS...]  Checks that every server in the inventory has both keys.
+  \(tool) inventory       Lists the servers in the inventory.
+  \(tool) set backup-path DIR|none
+        Folder (ideally synced to the cloud) for the encrypted inventory.
+  \(tool) recovery create [--replace] [--own-passphrase]
+        Creates a new emergency kit (passphrase-protected key, kept off this Mac).
+  \(tool) recovery import FILE.pub [--replace]
+        Uses an emergency key you already have; only its public key is copied.
+  \(tool) recovery pubkey Prints the emergency public key.
   \(tool) create [--comment TEXT] [--biometry current-set|any]
-        Creates the identity. Default: current-set (adding or removing a
-        fingerprint invalidates the key; keep a recovery key on the server).
+        Creates only the Touch ID key. Default: current-set (adding or removing
+        a fingerprint invalidates the key; the emergency key covers that).
   \(tool) pubkey          Prints the public key (authorized_keys line).
   \(tool) fingerprint     Prints the SHA256 fingerprint of the public key.
   \(tool) status          Diagnostics: Secure Enclave, Touch ID, identity and agent.
@@ -106,10 +120,10 @@ func create(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
     \(identity.authorizedKeyLine)
 
     Next steps:
-      1. Add the line above to the server's ~/.ssh/authorized_keys, for example:
-           ssh-copy-id -f -i \(paths.displayPath(paths.publicKeyFile)) user@server
+      1. Create the emergency kit and backup folder:  \(tool) setup
       2. Start the agent:  \(tool) install
-      3. Generate the ~/.ssh/config block:  \(tool) config my-server --host server --user user
+      3. Install both keys on each server:  \(tool) authorize user@server -p PORT
+      4. Generate the ~/.ssh/config block:  \(tool) config my-server --host server --user user
     """)
 }
 
@@ -147,7 +161,7 @@ func status(paths: AgentPaths) {
         if let identity {
             print("Identity:       \(identity.fingerprint) (\(identity.comment))")
         } else {
-            print("Identity:       none — run `\(tool) create`")
+            print("Identity:       none — run `\(tool) setup`")
         }
     } catch {
         print("Identity:       error — \(error)")
@@ -168,6 +182,7 @@ func status(paths: AgentPaths) {
     } else {
         print("LaunchAgent:    not installed — run `\(tool) install`")
     }
+    recoveryStatus(paths: paths)
 }
 
 func config(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
@@ -265,6 +280,16 @@ let rest = arguments.dropFirst()
 
 do {
     switch arguments.first {
+    case "setup": try setup(rest, paths: paths)
+    case "authorize": try authorize(rest, paths: paths)
+    case "audit": try audit(rest, paths: paths)
+    case "inventory": try listInventory(paths: paths)
+    case "recovery": try recovery(rest, paths: paths)
+    case "set":
+        guard rest.first == "backup-path", rest.count == 2 else {
+            throw UsageError(description: "usage: \(tool) set backup-path DIR|none")
+        }
+        try setBackupFolder(rest[rest.startIndex + 1], paths: paths)
     case "create": try create(rest, paths: paths)
     case "pubkey": pubkey(paths: paths)
     case "fingerprint": fingerprint(paths: paths)

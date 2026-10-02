@@ -52,14 +52,14 @@ func throwsError(_ body: () throws -> Void) -> Bool {
     return false
 }
 
-struct CommandResult {
+struct ShellResult {
     let status: Int32
     let stdout: String
     let stderr: String
 }
 
 @discardableResult
-func run(_ executable: String, _ arguments: [String], environment: [String: String] = [:], stdin: Data? = nil) throws -> CommandResult {
+func run(_ executable: String, _ arguments: [String], environment: [String: String] = [:], stdin: Data? = nil) throws -> ShellResult {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
@@ -74,7 +74,7 @@ func run(_ executable: String, _ arguments: [String], environment: [String: Stri
     let stdoutData = out.fileHandleForReading.readDataToEndOfFile()
     let stderrData = err.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
-    return CommandResult(
+    return ShellResult(
         status: process.terminationStatus,
         stdout: String(decoding: stdoutData, as: UTF8.self),
         stderr: String(decoding: stderrData, as: UTF8.self)
@@ -460,6 +460,133 @@ test("inventory backup: age decrypts it with the kit, other keys cannot, re-encr
     check(leftovers.sorted() == [InventoryBackup.readmeName, InventoryBackup.fileName].sorted(), "no temp files: \(leftovers)")
 }
 
+// MARK: - CLI, driven through a real terminal with expect
+
+print("CLI (interactive flows through expect)")
+
+/// The CLI binary next to this test binary (`swift build` builds both).
+let cliBinary = Bundle.main.executableURL!.deletingLastPathComponent().appendingPathComponent("touchid-ssh-agent").path
+
+/// Runs an expect script; `$env(CLI)` is the CLI and the agent directory is `paths`.
+func expectScript(_ body: String, paths: AgentPaths, extra: [String: String] = [:], in directory: URL) throws -> ShellResult {
+    let script = directory.appendingPathComponent("script-\(UUID().uuidString).exp")
+    try ("set timeout 90\nlog_user 1\n" + body).write(to: script, atomically: true, encoding: .utf8)
+    var environment = ["CLI": cliBinary, AgentPaths.environmentVariable: paths.directory.path, "TOUCHID_SSH_AGENT_NO_REVEAL": "1"]
+    environment.merge(extra) { $1 }
+    return try run("/usr/bin/expect", ["-f", script.path], environment: environment)
+}
+
+/// expect fragment: reads the generated passphrase into $pass and retypes it.
+let confirmPassphrase = #"""
+expect {
+  -re {\n    ([2-9a-z]{4}(-[2-9a-z]{4}){5})\r} { set pass $expect_out(1,string) }
+  timeout { puts "NO_PASSPHRASE"; exit 2 }
+}
+expect "Retype the passphrase"
+send -- "$pass\r"
+expect "Passphrase confirmed."
+"""#
+
+test("recovery create: passphrase shown once and retyped, kit saved, nothing left on the Mac") {
+    guard FileManager.default.isExecutableFile(atPath: cliBinary) else {
+        check(false, "CLI not built: run `swift build` first")
+        return
+    }
+    let directory = try makeTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let paths = AgentPaths(directory: directory.appendingPathComponent("a"))
+    let copy = directory.appendingPathComponent("saved-kit.txt")
+    let result = try expectScript(#"""
+    spawn $env(CLI) recovery create
+    """# + "\n" + confirmPassphrase + #"""
+
+    expect "Type SAVED"
+    exec cp $env(KIT) $env(COPY)
+    send -- "SAVED\r"
+    expect eof
+    puts "\nPASS=$pass"
+    """#, paths: paths, extra: ["KIT": paths.kitDirectory.appendingPathComponent(EmergencyKitBuilder.kitFileName).path,
+                                 "COPY": copy.path], in: directory)
+    let passphrase = result.stdout.components(separatedBy: "PASS=").last?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    check(result.status == 0 && passphrase.count == 29, "flow completed: \(result.stdout.suffix(300))")
+    check(result.stdout.contains("Emergency key configured"), "configured")
+    let key = try RecoveryStore.load(from: paths)
+    check(key != nil, "recovery.pub installed")
+    check(!FileManager.default.fileExists(atPath: paths.kitDirectory.path), "kit erased from the Mac")
+    if let key {
+        check((try? EmergencyKitBuilder.verify(kitFile: copy, passphrase: passphrase, expected: key)) != nil,
+              "the saved kit opens with the passphrase that was shown")
+    }
+    check(!result.stdout.contains(passphrase) || result.stdout.components(separatedBy: passphrase).count == 3,
+          "passphrase printed once (plus the test's own PASS= line)")
+}
+
+test("recovery create: three wrong retypes or ABORT configure nothing") {
+    let directory = try makeTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let paths = AgentPaths(directory: directory.appendingPathComponent("a"))
+    let wrong = try expectScript(#"""
+    spawn $env(CLI) recovery create
+    expect -re {([2-9a-z]{4}(-[2-9a-z]{4}){5})}
+    for {set i 0} {$i < 3} {incr i} { expect "Retype the passphrase"; send -- "wrong\r" }
+    expect eof
+    """#, paths: paths, in: directory)
+    check(wrong.stdout.contains("Nothing was created"), "mismatch aborts: \(wrong.stdout.suffix(200))")
+    check(try RecoveryStore.load(from: paths) == nil, "no emergency key after mismatch")
+
+    let aborted = try expectScript(#"""
+    spawn $env(CLI) recovery create
+    """# + "\n" + confirmPassphrase + #"""
+
+    expect "Type SAVED"
+    send -- "ABORT\r"
+    expect eof
+    """#, paths: paths, in: directory)
+    check(aborted.stdout.contains("Aborted. The kit was erased"), "abort: \(aborted.stdout.suffix(200))")
+    check(try RecoveryStore.load(from: paths) == nil, "no emergency key after abort")
+    check(!FileManager.default.fileExists(atPath: paths.kitDirectory.path), "kit erased after abort")
+}
+
+test("setup: backup folder, new kit, and age opens the backup with the passphrase-protected kit") {
+    guard let age = agePath else {
+        check(false, "age is not installed (brew install age)")
+        return
+    }
+    let directory = try makeTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let paths = AgentPaths(directory: directory.appendingPathComponent("a"))
+    // An existing identity, so setup does not create a Touch ID key.
+    try IdentityStore.createWithoutUserPresenceForTesting(in: paths)
+    let backup = directory.appendingPathComponent("cloud folder")
+    let copy = directory.appendingPathComponent("saved-kit.txt")
+    let result = try expectScript(#"""
+    spawn $env(CLI) setup
+    expect "Already created"
+    expect "or 'skip': "
+    send -- "$env(BACKUP)\r"
+    expect "new/import"
+    send -- "new\r"
+    """# + "\n" + confirmPassphrase + #"""
+
+    expect "Type SAVED"
+    exec cp $env(KIT) $env(COPY)
+    send -- "SAVED\r"
+    expect "Next steps"
+    expect eof
+    spawn $env(AGE) -d -i $env(COPY) $env(BACKUP)/inventory.age
+    expect "passphrase"
+    send -- "$pass\r"
+    expect eof
+    """#, paths: paths, extra: ["BACKUP": backup.path, "AGE": age, "COPY": copy.path,
+                                 "KIT": paths.kitDirectory.appendingPathComponent(EmergencyKitBuilder.kitFileName).path],
+       in: directory)
+    check(result.status == 0, "expect: \(result.stdout.suffix(300))")
+    check(SettingsStore.load(from: paths).backupPath == backup.path, "backup folder saved")
+    check(try RecoveryStore.load(from: paths) != nil, "emergency key configured")
+    check(FileManager.default.fileExists(atPath: backup.appendingPathComponent(InventoryBackup.fileName).path), "inventory.age written")
+    check(result.stdout.contains("\"servers\""), "age decrypted the backup with the real kit and passphrase")
+}
+
 // MARK: - Secure Enclave identity and live agent
 
 print("Secure Enclave identity and live agent")
@@ -545,14 +672,14 @@ struct LiveAgent {
     }
 
     /// `ssh-keygen -Y sign` through the agent; returns the signature file if any.
-    func sshsigSign(_ message: String, tag: String) throws -> (result: CommandResult, signature: URL, message: URL) {
+    func sshsigSign(_ message: String, tag: String) throws -> (result: ShellResult, signature: URL, message: URL) {
         let messageFile = directory.appendingPathComponent("msg-\(tag)")
         try message.write(to: messageFile, atomically: true, encoding: .utf8)
         let result = try run("/usr/bin/ssh-keygen", ["-Y", "sign", "-f", paths.publicKeyFile.path, "-n", "file", messageFile.path], environment: environment)
         return (result, messageFile.appendingPathExtension("sig"), messageFile)
     }
 
-    func sshsigVerify(signature: URL, message: URL) throws -> CommandResult {
+    func sshsigVerify(signature: URL, message: URL) throws -> ShellResult {
         let signers = directory.appendingPathComponent("allowed_signers")
         try "test@local \(identity.authorizedKeyLine)\n".write(to: signers, atomically: true, encoding: .utf8)
         return try run("/usr/bin/ssh-keygen", ["-Y", "verify", "-f", signers.path, "-I", "test@local", "-n", "file", "-s", signature.path],
@@ -604,7 +731,7 @@ test("concurrent signatures are serialized and all valid") {
     defer { agent.stop() }
     let group = DispatchGroup()
     let lock = NSLock()
-    var outcomes: [(CommandResult, URL, URL)] = []
+    var outcomes: [(ShellResult, URL, URL)] = []
     for index in 0..<8 {
         group.enter()
         DispatchQueue.global().async {
@@ -679,7 +806,7 @@ if runDocker {
         .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("e2e")
     let docker = ["/usr/local/bin/docker", "/opt/homebrew/bin/docker"].first { FileManager.default.isExecutableFile(atPath: $0) } ?? "docker"
 
-    func ssh(_ agent: LiveAgent, port: String, command: String) throws -> CommandResult {
+    func ssh(_ agent: LiveAgent, port: String, command: String) throws -> ShellResult {
         try run("/usr/bin/ssh", [
             "-F", "/dev/null",
             "-o", "IdentityAgent=\(agent.socket)",
@@ -838,6 +965,30 @@ if runDocker {
         outcome = RemoteKeys.audit(target, keys: keys, paths: approving.paths, identity: approving.identity)
         check(outcome.login != .ok, "Touch ID key no longer logs in: \(outcome.login)")
         check(outcome.present["login"] != true, "login key reported missing: \(outcome)")
+    }
+
+    test("CLI: authorize restores both keys, audit passes, inventory and backup updated") {
+        let backup = work.appendingPathComponent("backup")
+        let environment = [AgentPaths.environmentVariable: approving.paths.directory.path]
+        let set = try run(cliBinary, ["set", "backup-path", backup.path], environment: environment)
+        check(set.status == 0, "set backup-path: \(set.stderr)")
+
+        let authorized = try run(cliBinary, ["authorize", "e2e", "-F", config.path, "--alias", "e2e-server"], environment: environment)
+        check(authorized.status == 0, "authorize exit status: \(authorized.stdout) \(authorized.stderr)")
+        check(authorized.stdout.contains("Touch ID key : added") && authorized.stdout.contains("emergency key: added"),
+              "both keys re-added: \(authorized.stdout)")
+        check(authorized.stdout.contains("✓ The server accepted the Touch ID key."), "Touch ID key verified")
+
+        let inventory = try InventoryStore.load(from: approving.paths)
+        check(inventory.servers.map(\.alias) == ["e2e-server"], "inventory entry: \(inventory.servers.map(\.alias))")
+        check(inventory.servers.first?.port == Int(authPort), "resolved port stored")
+        let decrypted = try run(agePath ?? "age", ["-d", "-i", recoveryKit.kit.path, backup.appendingPathComponent(InventoryBackup.fileName).path])
+        check(decrypted.stdout.contains("e2e-server") && decrypted.stdout.contains("127.0.0.1"), "backup holds the entry")
+
+        let audited = try run(cliBinary, ["audit"], environment: environment)
+        check(audited.status == 0 && audited.stdout.contains("All servers have both keys."), "audit: \(audited.stdout)")
+        let listed = try run(cliBinary, ["inventory"], environment: environment)
+        check(listed.stdout.contains("e2e-server") && listed.stdout.contains("tester@127.0.0.1"), "inventory list: \(listed.stdout)")
     }
 } else {
     print("(real Docker login skipped; use --docker)")
