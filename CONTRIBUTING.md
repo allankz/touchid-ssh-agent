@@ -15,6 +15,8 @@ These are the project's promises to its users. Changes that weaken any of them n
 - **The emergency kit stays off the Mac.** Only its public key is stored locally; the inventory backup is encrypted to it.
 - **No network calls, accounts or telemetry** from the agent. `authorize` and `audit` only talk to the servers the user names, through `ssh`.
 - **Logs carry no secrets**: no key material, payloads, remote user names or hosts.
+- **Upgrades are additive.** A new version must keep working with the Touch ID key, emergency key, inventory and settings created by earlier versions, and must never require touching servers that were already authorized. File formats only gain optional fields; anything that needs user action is an explicit command the user chooses to run.
+- **Command line only.** There is no graphical app, and none is planned.
 - **No new dependencies** without discussion. The package has no Swift dependencies; `age` is the only external tool besides what ships with macOS.
 
 ## Requirements

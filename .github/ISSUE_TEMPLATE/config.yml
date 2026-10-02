@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ideas and questions
+    url: https://github.com/allankz/touchid-ssh-agent/discussions/categories/ideas
+    about: Suggest a feature or ask a question in Discussions.
+  - name: Report a vulnerability
+    url: https://github.com/allankz/touchid-ssh-agent/security/advisories/new
+    about: Please report security problems privately, never in a public issue.
