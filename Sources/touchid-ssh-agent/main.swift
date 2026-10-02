@@ -48,7 +48,12 @@ struct UsageError: Error, CustomStringConvertible {
 }
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
-    FileHandle.standardError.write(Data("error: \(message)\n".utf8))
+    fflush(stdout)
+    let margin = isatty(STDERR_FILENO) == 1 ? Out.margin : ""
+    let text = message.split(separator: "\n", omittingEmptySubsequences: false)
+        .enumerated().map { $0.offset == 0 ? "\(margin)error: \($0.element)" : "\(margin)\($0.element)" }
+        .joined(separator: "\n")
+    FileHandle.standardError.write(Data((text + "\n").utf8))
     exit(code)
 }
 
@@ -111,7 +116,7 @@ func create(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
         policy: policy,
         comment: options["comment"] ?? IdentityStore.defaultComment()
     )
-    print("""
+    Out.say("""
     Identity created in the Secure Enclave (policy: \(policy.rawValue)).
 
     Fingerprint: \(identity.fingerprint)
@@ -152,35 +157,35 @@ func biometryStatus() -> String {
 }
 
 func status(paths: AgentPaths) {
-    print("Secure Enclave: \(SecureEnclave.isAvailable ? "available" : "unavailable")")
-    print("Touch ID:       \(biometryStatus())")
+    Out.say("Secure Enclave: \(SecureEnclave.isAvailable ? "available" : "unavailable")")
+    Out.say("Touch ID:       \(biometryStatus())")
 
     var identity: StoredIdentity?
     do {
         identity = try IdentityStore.load(from: paths)
         if let identity {
-            print("Identity:       \(identity.fingerprint) (\(identity.comment))")
+            Out.say("Identity:       \(identity.fingerprint) (\(identity.comment))")
         } else {
-            print("Identity:       none — run `\(tool) setup`")
+            Out.say("Identity:       none — run `\(tool) setup`")
         }
     } catch {
-        print("Identity:       error — \(error)")
+        Out.say("Identity:       error — \(error)")
     }
 
     let socket = paths.displayPath(paths.socket)
     if let offered = AgentClient.listIdentities(socketPath: paths.socket.path) {
         let offersIdentity = identity.map { id in offered.contains { $0.blob == id.publicKeyBlob } } ?? false
-        print("Agent:          running at \(socket)\(offersIdentity ? " (offering the identity)" : " (no identity)")")
+        Out.say("Agent:          running at \(socket)\(offersIdentity ? " (offering the identity)" : " (no identity)")")
     } else {
-        print("Agent:          stopped (\(socket))")
+        Out.say("Agent:          stopped (\(socket))")
     }
 
     if LaunchAgent.isLoaded {
-        print("LaunchAgent:    loaded (\(LaunchAgent.label))")
+        Out.say("LaunchAgent:    loaded (\(LaunchAgent.label))")
     } else if FileManager.default.fileExists(atPath: LaunchAgent.plistURL.path) {
-        print("LaunchAgent:    installed but not loaded")
+        Out.say("LaunchAgent:    installed but not loaded")
     } else {
-        print("LaunchAgent:    not installed — run `\(tool) install`")
+        Out.say("LaunchAgent:    not installed — run `\(tool) install`")
     }
     recoveryStatus(paths: paths)
 }
@@ -246,30 +251,29 @@ func install(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
         usleep(100_000)
         listening = AgentClient.isListening(socketPath: paths.socket.path)
     }
-    print("LaunchAgent \(LaunchAgent.label) installed: \(LaunchAgent.plistURL.path)")
-    print(listening
+    Out.say("LaunchAgent \(LaunchAgent.label) installed: \(LaunchAgent.plistURL.path)")
+    Out.say(listening
         ? "Agent running at \(paths.displayPath(paths.socket))."
         : "Warning: the agent has not answered yet; see \(paths.displayPath(paths.directory))/agent.stderr.log")
 }
 
 func uninstall() throws {
     try LaunchAgent.uninstall()
-    print("LaunchAgent removed. The identity stays on disk; use `\(tool) delete` to delete it.")
+    Out.say("LaunchAgent removed. The identity stays on disk; use `\(tool) delete` to delete it.")
 }
 
 func delete(paths: AgentPaths) throws {
     let identity = requireIdentity(paths)
-    print("""
+    Out.say("""
     This permanently deletes the identity \(identity.fingerprint) (\(identity.comment)).
     Servers that only accept this key will stop accepting your login.
-    Type DELETE to confirm:
-    """, terminator: " ")
-    guard readLine(strippingNewline: true) == "DELETE" else {
-        print("Nothing was deleted.")
+    """)
+    guard Terminal.ask("Type DELETE to confirm: ") == "DELETE" else {
+        Out.say("Nothing was deleted.")
         return
     }
     try IdentityStore.delete(from: paths)
-    print("Identity deleted.")
+    Out.say("Identity deleted.")
 }
 
 // MARK: - Entry point
@@ -277,6 +281,13 @@ func delete(paths: AgentPaths) throws {
 let arguments = CommandLine.arguments.dropFirst()
 let paths = AgentPaths.fromEnvironment()
 let rest = arguments.dropFirst()
+
+/// Output meant for files and scripts stays bare; everything else gets spacing.
+let machineReadable: Set<String> = ["pubkey", "fingerprint", "config", "agent", "version", "--version"]
+if !machineReadable.contains(arguments.first ?? "help"), !(arguments.first == "recovery" && rest.first == "pubkey") {
+    print("")
+    atexit { print("") }
+}
 
 do {
     switch arguments.first {
@@ -300,7 +311,7 @@ do {
     case "uninstall": try uninstall()
     case "delete": try delete(paths: paths)
     case "version", "--version": print(version)
-    case nil, "help", "--help", "-h": print(usage)
+    case nil, "help", "--help", "-h": Out.say(usage)
     case let command?: throw UsageError(description: "unknown command: \(command)\n\n\(usage)")
     }
 } catch {

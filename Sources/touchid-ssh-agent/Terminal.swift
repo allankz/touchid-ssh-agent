@@ -13,7 +13,8 @@ enum Terminal {
 
     /// Visible input. Returns nil at end of input.
     static func ask(_ prompt: String) -> String? {
-        print(prompt, terminator: "")
+        print("")
+        print(Out.margin + prompt, terminator: "")
         fflush(stdout)
         return readLine(strippingNewline: true)
     }
@@ -22,7 +23,9 @@ enum Terminal {
     static func askHidden(_ prompt: String) -> String? {
         var buffer = [CChar](repeating: 0, count: 1024)
         defer { memset_s(&buffer, buffer.count, 0, buffer.count) }
-        guard readpassphrase(prompt, &buffer, buffer.count, RPP_ECHO_OFF | RPP_REQUIRE_TTY) != nil else {
+        print("")
+        fflush(stdout)
+        guard readpassphrase(Out.margin + prompt, &buffer, buffer.count, RPP_ECHO_OFF | RPP_REQUIRE_TTY) != nil else {
             return nil
         }
         return String(cString: buffer)
@@ -43,10 +46,6 @@ enum Terminal {
         guard isatty(STDOUT_FILENO) == 1 else { return }
         print("\u{1b}[2J\u{1b}[3J\u{1b}[H", terminator: "")
         fflush(stdout)
-    }
-
-    static func heading(_ text: String) {
-        print("\n\(text)\n\(String(repeating: "─", count: text.count))")
     }
 
     /// Quotes a path for a shell command shown to the user (paths may contain spaces).
