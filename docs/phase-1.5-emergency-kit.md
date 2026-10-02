@@ -42,7 +42,32 @@ The Touch ID key never leaves the Secure Enclave of one Mac. That is the point, 
 
 ### audit
 
-Logs in to each inventory server with the Touch ID key (one Touch ID each) and reports whether both keys are present. It records the result in the inventory.
+Logs in to each inventory server with the Touch ID key (one Touch ID each) and reports whether both keys are present. It also reports whether some `Host` in the ssh config reaches the server through the Touch ID agent. It records the result and the server's host key in the inventory.
+
+### ssh config
+
+After installing the keys, `authorize` shows the `Host` block for the server and, with confirmation, adds it to `~/.ssh/config` (or to the `-F` file). When the destination is not an alias yet, it asks for a short name, which then also names the server in the inventory. When the alias exists but does not use the agent, it offers to add the agent lines to that block, after saving the file as `.touchid-backup`.
+
+### recover
+
+Run on a new Mac with the old kit: `touchid-ssh-agent recover emergency-kit.txt`.
+
+1. **Open the inventory.** `age -d -i kit inventory.age` asks for the passphrase (first prompt). The file is found from the folder named in the kit, this Mac's backup folder, `--inventory`, or a path the user types.
+2. **Touch ID key.** It is created if missing. The agent is started if it is not running. If this Mac's key is the one the inventory lists, recover refuses, because it would remove the key it runs on.
+3. **New emergency kit.** The used kit counts as exposed, so a new one is created, unless a different emergency key is already configured or `--keep-emergency-key` is given.
+4. **Each server.**
+   - The kit is loaded into a throwaway `ssh-agent` with `ssh-add -` (second prompt). The kit arrives on stdin, so its file permissions do not matter.
+   - Logging in with the old emergency key, recover adds this Mac's keys. The host key is checked against the one in the inventory, or trusted on first use with a warning for older entries.
+   - It checks the new Touch ID login (one Touch ID), then removes the lines whose fingerprint is exactly the lost Mac's key or the used emergency key, never this Mac's keys.
+   - Servers already moved by an earlier run are skipped.
+5. **ssh config** blocks for the moved servers, with the same prompts as `authorize`.
+6. **Audit** of the moved servers (one more Touch ID each).
+
+If every server moved, the previous backup is kept as `inventory-before-recovery-DATE.age` and a new one, encrypted to the new kit, replaces it. If any server failed, its old keys stay, the backup is not replaced, and the old kit keeps working for another run.
+
+### recovery test
+
+The same first steps without changing anything: it opens the inventory, loads the kit and logs in to every server with the emergency key only. Unknown host keys go to a scratch file, so not even `known_hosts` changes.
 
 ## Decisions
 
@@ -88,6 +113,6 @@ The kit carries these steps, filled in with its fingerprints and backup folder:
 
 ## Known limitations
 
-- Replacing the emergency key does not remove the old one from servers. `authorize` installs the new key, and the old line must be removed by hand.
+- `recovery create --replace` does not remove the old emergency key from servers: `authorize` installs the new key and the old line must be removed by hand. (`recover` does remove the used key.)
 - The kit lists the backup folder it was created with. After `set backup-path`, note the new location next to the kit.
-- `audit` costs one Touch ID per server.
+- `audit` costs one Touch ID per server; `recover` costs two (the check before removing the old keys, and the final audit).

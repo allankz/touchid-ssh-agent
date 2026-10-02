@@ -41,6 +41,7 @@ This is a personal project maintained on a best-effort basis. The goals are to a
 - **Destination checks without `publickey-hostbound`.** For older servers the agent cannot know where a signature will be used. The process chain shown in the prompt is informational and can be stale.
 - **Loss of availability.** The Touch ID key is gone if the Mac fails, if fingerprints change under the `current-set` policy, or after `delete`. The emergency kit covers this only if it was stored outside the Mac.
 - **Theft of the emergency kit together with its passphrase.** The emergency key is a regular software key: whoever has the kit and the passphrase can log in to every server that trusts it, without Touch ID. Its protection is the passphrase (about 119 bits when generated, bcrypt KDF with 200 rounds) and keeping the kit off the Mac, ideally apart from the passphrase.
+- **A man in the middle during recovery** for servers whose host key was never recorded (entries recorded before host keys were stored, until their next `audit`).
 - **Reading the local inventory on a stolen Mac.** `inventory.json` is plain JSON (mode `0600`) so the agent can use it without a passphrase. FileVault protects it at rest; `status` warns when FileVault is off.
 
 ## Security design
@@ -56,6 +57,13 @@ This is a personal project maintained on a best-effort basis. The goals are to a
 - **Emergency kit**: `ssh-keygen` generates the key in a new session without a controlling terminal, with the passphrase written to its stdin. The passphrase never appears on a command line or in the environment, and askpass variables are removed. The kit must open with the passphrase (`ssh-keygen -y`) before it is shown to the user. It is erased from the Mac once the user confirms it was saved, and only the public key is kept.
 - **Imports**: `recovery import` accepts only ed25519 or rsa public keys and refuses private keys.
 - **Inventory backup**: `age -R recovery.pub`, with the plaintext piped through stdin (never written to a temporary file) and the result moved into place atomically. Replacing the emergency key re-encrypts the backup for the new key.
+- **recover and recovery test**:
+  - The emergency key is loaded into a throwaway `ssh-agent` with `ssh-add -`, with the kit arriving on stdin, so this tool never writes the key to disk. The agent is killed when the command ends.
+  - age and ssh-add read the passphrase from the terminal themselves; this program never sees it.
+  - Server host keys are checked against the ones recorded in the inventory. Only entries recorded before host keys were stored fall back to trust on first use, with a visible warning; the next `audit` records them.
+  - On each server, this Mac's keys are added first. The old keys are removed only after the new Touch ID key has logged in, only when their fingerprint matches the lost Mac's key or the used emergency key exactly, and never when they are this Mac's keys.
+  - If any server fails, its old keys stay, the cloud backup is not replaced, and the old kit keeps working for another run.
+- **ssh config edits**: only after the user confirms. New `Host` blocks are appended; when lines are added to an existing block, the previous file is saved next to it as `.touchid-backup` first.
 - **authorize and audit**: keys are appended by a small POSIX `sh` script that matches existing keys by blob, fixes a missing final newline and quotes only a restricted character set. The Touch ID check disables connection sharing (`ControlPath=none`), uses `BatchMode`, and confirms from `ssh -v` that the server accepted the Touch ID key's fingerprint, so another configured key cannot pass for it.
 
 ## Scope
