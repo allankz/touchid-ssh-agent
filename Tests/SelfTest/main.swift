@@ -470,6 +470,39 @@ test("inventory backup: age decrypts it with the kit, other keys cannot, re-encr
     check(leftovers.sorted() == [InventoryBackup.readmeName, InventoryBackup.fileName].sorted(), "no temp files: \(leftovers)")
 }
 
+test("inventory backup: an existing file is never replaced by an empty inventory") {
+    let directory = try makeTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let folder = directory.appendingPathComponent("cloud")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+    let settings = AgentSettings(backupPath: folder.path)
+    let backup = folder.appendingPathComponent(InventoryBackup.fileName)
+
+    // The old Mac's backup, with one server.
+    let oldMac = AgentPaths(directory: directory.appendingPathComponent("old-mac"))
+    let oldKit = try plainKit(in: directory, name: "old")
+    try RecoveryStore.importPublicKey(from: oldKit.publicKey, into: oldMac, replace: false)
+    var inventory = Inventory(mac: "old")
+    inventory.upsert(InventoryEntry(alias: "web", destination: "web", hostname: "server.example", user: "deploy", port: 22,
+                                    sshConfigFile: nil, loginKeyFingerprint: "SHA256:a", recoveryKeyFingerprint: "SHA256:b",
+                                    authorizedAt: Date()))
+    try InventoryStore.save(inventory, to: oldMac)
+    check(InventoryBackup.export(paths: oldMac, settings: settings) == .written(backup), "old Mac writes its backup")
+    let original = try Data(contentsOf: backup)
+
+    // A new Mac with a new emergency key and no servers yet must not replace it.
+    let newMac = AgentPaths(directory: directory.appendingPathComponent("new-mac"))
+    let newKit = try plainKit(in: directory, name: "new")
+    try RecoveryStore.importPublicKey(from: newKit.publicKey, into: newMac, replace: false)
+    check(InventoryBackup.export(paths: newMac, settings: settings) == .keptExisting(backup), "empty inventory keeps the file")
+    check((try? Data(contentsOf: backup)) == original, "backup unchanged")
+
+    // Once the new Mac has servers, it replaces the backup as usual.
+    try InventoryStore.save(inventory, to: newMac)
+    check(InventoryBackup.export(paths: newMac, settings: settings) == .written(backup), "non-empty inventory writes")
+    check((try? Data(contentsOf: backup)) != original, "backup replaced")
+}
+
 // MARK: - CLI, driven through a real terminal with expect
 
 print("CLI (interactive flows through expect)")
