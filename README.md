@@ -181,6 +181,8 @@ make test-docker   # adds a real SSH login against an sshd container
 make test-touchid  # interactive: approve, deny and time out real Touch ID prompts, with the agent under launchd
 ```
 
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the ground rules, requirements and how to submit changes.
+
 The interactive commands (`setup`, `recovery create`) are driven through a real pseudo-terminal with `expect`. The tests create Secure Enclave keys **without** Touch ID, only in temporary directories. That API is `@_spi(Testing)`, refuses the default directory and is not reachable from the CLI. The Mac must stay unlocked while the tests run.
 
 Layout:
