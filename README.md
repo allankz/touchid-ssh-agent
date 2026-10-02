@@ -1,0 +1,171 @@
+# Touch ID SSH Agent for macOS
+
+An SSH agent for macOS that keeps the key in the **Secure Enclave** and requires **Touch ID for every signature**. The `ssh` client stays the same, and the server only needs the public key in `authorized_keys`.
+
+> Status: experimental (0.1.0). It does not replace an access recovery plan: always keep a second authorized key on the server (see [Recovery](#recovery)).
+
+## How it works
+
+```text
+ssh (or git, or an AI agent running ssh)
+   │  Unix socket ~/.touchid-ssh-agent/agent.sock (ssh-agent protocol)
+   ▼
+touchid-ssh-agent  ──►  Touch ID (LocalAuthentication, fresh context per request)
+   │
+   ▼
+Secure Enclave: signs; the private key never leaves the chip
+```
+
+- The key is ECDSA P-256 (`ecdsa-sha2-nistp256`), generated **inside** the Secure Enclave.
+- `~/.touchid-ssh-agent/identity.se` only holds a blob encrypted by the Secure Enclave. It does not work on any other Mac and cannot be turned into a private key.
+- The Touch ID requirement is sealed into **the blob itself** by the Secure Enclave. Changing the file or the program does not remove it.
+- Every signature request creates a fresh authentication context. There is no reuse, no silent mode and no "remember for N minutes".
+- If nobody approves within 60 s, the request is denied.
+
+### What the Touch ID prompt shows
+
+macOS shows something like:
+
+> “touchid-ssh-agent” is trying to **log in over SSH as admin to server.example, requested by ssh ← zsh ← claude**.
+
+- **Remote user**: what `ssh` put in the authentication request.
+- **Server**: when the server supports `publickey-hostbound` (OpenSSH ≥ 8.9), the signature is bound to the server's host key, and the agent looks up the matching name in your `~/.ssh/known_hosts`. Without that binding the prompt names no server, because the protocol gives no way to confirm the destination.
+- **Requester**: the chain of local processes that opened the socket (`ssh ← zsh ← Terminal`). It is a hint, not proof.
+- SSH-signed git commits show up as "sign a git commit or tag".
+
+The words around the reason ("is trying to") come from macOS in the system language.
+
+## Requirements
+
+- A Mac with Touch ID (Apple Silicon or T2) running macOS 13 or later.
+- Swift 5.10 or later. The Command Line Tools are enough: `xcode-select --install`.
+
+## Installation
+
+```bash
+make install                       # builds and copies to ~/.local/bin
+touchid-ssh-agent create           # creates the identity in the Secure Enclave
+touchid-ssh-agent install          # registers the LaunchAgent (starts with your session)
+touchid-ssh-agent status
+```
+
+`create` prints the public key. Add it to the server **using an access method that already works**:
+
+```bash
+ssh-copy-id -f -i ~/.touchid-ssh-agent/id_ecdsa_se.pub user@server
+```
+
+Generate the `~/.ssh/config` block. The command only prints it and changes no file:
+
+```bash
+touchid-ssh-agent config my-server --host server.example --user admin --port 22
+```
+
+```sshconfig
+Host my-server
+  HostName server.example
+  User admin
+  Port 22
+  IdentityAgent ~/.touchid-ssh-agent/agent.sock
+  IdentityFile ~/.touchid-ssh-agent/id_ecdsa_se.pub
+  IdentitiesOnly yes
+  ForwardAgent no
+```
+
+`IdentityFile` points to the **public** key on purpose. With `IdentitiesOnly yes`, `ssh` only uses the keys listed there. When it finds the public key, it asks the agent for the signature. Without that line, `ssh` would never offer the Secure Enclave key.
+
+From then on, `ssh my-server` asks for Touch ID.
+
+### Signing git commits
+
+git signs with `ssh-keygen -Y sign`, which looks for the agent in `SSH_AUTH_SOCK`. It does not read `IdentityAgent` from `ssh_config`. To use Touch ID for commits without replacing the system's default agent, point git to a small wrapper:
+
+```bash
+printf '#!/bin/sh\nSSH_AUTH_SOCK="$HOME/.touchid-ssh-agent/agent.sock" exec /usr/bin/ssh-keygen "$@"\n' > ~/.local/bin/ssh-keygen-touchid
+chmod +x ~/.local/bin/ssh-keygen-touchid
+git config --global gpg.format ssh
+git config --global gpg.ssh.program ~/.local/bin/ssh-keygen-touchid
+git config --global user.signingkey ~/.touchid-ssh-agent/id_ecdsa_se.pub
+git config --global commit.gpgsign true
+```
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `create [--comment T] [--biometry current-set\|any]` | Creates the identity. Refuses if one already exists. |
+| `pubkey` / `fingerprint` | Prints the public key or its SHA256 fingerprint. |
+| `status` | Secure Enclave, Touch ID (including password lockout), identity, agent and LaunchAgent. |
+| `config ALIAS --host H [--user U] [--port P]` | Prints the `ssh_config` block. |
+| `agent` | Runs the agent in the foreground (useful for debugging). |
+| `install [--force]` / `uninstall` | Registers or removes the `local.touchid-ssh-agent` LaunchAgent. |
+| `delete` | Deletes the identity irreversibly, after you type `DELETE`. |
+
+By default everything lives in `~/.touchid-ssh-agent/`. Set `TOUCHID_SSH_AGENT_DIR` to use another directory. Touch ID must be approved within 60 s; to change that, set `TOUCHID_SSH_AGENT_PROMPT_TIMEOUT` (in seconds) in the agent's environment.
+
+### Biometry policies
+
+- `current-set` (default): only the fingerprints enrolled today. **Adding or removing a fingerprint invalidates the key forever.** This is the strictest option.
+- `any`: any fingerprint enrolled now or later. The key does not need to be recreated when fingerprints change.
+
+Neither accepts the Mac password as a fallback for Touch ID.
+
+## AI agents and automation
+
+An AI agent (or script) running on your Mac **can request** a signature through the socket, but it **cannot approve** it: every request opens Touch ID for you.
+
+- It does not read the private key, and it cannot. The key does not exist outside the Secure Enclave.
+- If you deny or ignore the prompt, authentication fails.
+- The prompt shows who asked (`ssh ← zsh ← claude`) and, when possible, where to.
+- Agents running off the Mac (cloud, a container without the socket mounted, another machine) cannot reach the agent.
+
+The agent only accepts connections from your own user (UID checked on the socket). The socket has mode `0600`, inside a `0700` directory.
+
+## Known limitations
+
+- Someone who already controls your user session can trigger requests and try to trick you into approving. Read the prompt before touching the sensor.
+- Without `publickey-hostbound`, the agent cannot know the destination. The name shown comes from `known_hosts`, not from a check of its own.
+- The process chain can be stale if the process exited and its PID was reused. That is why it only informs and never decides.
+- One identity per Mac in this version.
+- `ForwardAgent` re-exposes the agent to the remote server. Keep it off, even with Touch ID.
+
+See [`SECURITY.md`](SECURITY.md) for the threat model and how to report a vulnerability.
+
+## Recovery
+
+The key is tied to **this** Mac and, with the `current-set` policy, to the current fingerprints. It is gone if you change Macs, if the Mac fails, if the fingerprints change, or if you run `delete`. So:
+
+1. Keep an **independent recovery key** on the server, ideally a backup FIDO2 key or a key stored offline.
+2. To move to a new Mac: create the identity on the new Mac, add its public key to the server, test the login in a second session, and only then remove the old line from `authorized_keys`.
+3. Record in your inventory: alias, fingerprint, device, creation date and revocation date.
+
+## Roadmap
+
+- **Phase 2: temporary credentials for agents (overnight use).** One Touch ID before bed issues an SSH certificate valid for a few hours, with a restricted scope, signed by a CA kept in the Secure Enclave. The login key keeps asking for Touch ID on every use. Design in [`docs/phase-2-temporary-credentials.md`](docs/phase-2-temporary-credentials.md). Not implemented yet.
+- A menu bar app (SwiftUI) for status, identity creation and history. Requires Xcode.
+
+## Development
+
+```bash
+make test          # wire format, protocol, Secure Enclave and agent tests (OpenSSH as the oracle)
+make test-docker   # adds a real SSH login against an sshd container
+make test-touchid  # interactive: approve, deny and time out real Touch ID prompts, with the agent under launchd
+```
+
+The tests create Secure Enclave keys **without** Touch ID, only in temporary directories. That API is `@_spi(Testing)`, refuses the default directory and is not reachable from the CLI. The Mac must stay unlocked while the tests run.
+
+Layout:
+
+- `Sources/TouchIDSSHCore/`: SSH wire format, agent protocol, identity, signer, server and LaunchAgent.
+- `Sources/touchid-ssh-agent/`: CLI.
+- `Tests/SelfTest/`: test suite (an executable, because XCTest does not ship with the Command Line Tools).
+- `Tests/e2e/`: `sshd` image used by the end-to-end test.
+- `docs/`: design of upcoming phases.
+
+### Why a file and not the Keychain
+
+A Secure Enclave key stored in the Keychain is tied to the app's code signature and requires entitlements from an Apple Developer Team. With ad hoc signing, every rebuild would lose access to the key. CryptoKit's `dataRepresentation` blob has the same hardware guarantee (only this Mac's Secure Enclave can open it) and survives binary updates.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
