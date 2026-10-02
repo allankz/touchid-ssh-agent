@@ -1,0 +1,14 @@
+# macOS and editor metadata
+.DS_Store
+.vscode/
+
+# Swift build output
+.build/
+.swiftpm/
+
+# Local runtime state: agent socket and Secure Enclave key blobs.
+*.sock
+*.se
+
+# Private design notes.
+_docs/
