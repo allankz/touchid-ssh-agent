@@ -8,6 +8,30 @@ An SSH agent for macOS that keeps the key in the **Secure Enclave** and requires
 
 > Status: experimental (0.1.0). It does not replace an access recovery plan: always keep a second authorized key on the server (see [Recovery](#recovery)).
 
+## What problem does it solve?
+
+SSH keys are the right way to reach your servers: safer than passwords and just as easy to use. But a regular SSH key is a file in `~/.ssh`, and a file can be copied. If someone steals it, or you lose the computer, you have to create a new key and log in to every server twice: once to install the new key and once to remove the old one. With new vulnerabilities published every day and poisoned development packages that harvest credentials from developer machines, a stolen key is a real risk, not a theoretical one.
+
+touchid-ssh-agent keeps the convenience of SSH keys and gets rid of the file:
+
+- **Nothing to steal.** The key is created inside the Mac's Secure Enclave and never leaves it. Malware or a compromised package that copies `~/.ssh` finds nothing it can use.
+- **Touch ID for every SSH login.** Each signature needs your fingerprint, with no "remember me" window. Even an unlocked Mac is not enough without your finger.
+- **AI agents and scripts can ask, but only you approve.** The prompt shows who asked (`ssh ← zsh ← claude`) and, when the server supports it, where to.
+- **One command per server.** `authorize` installs both your Touch ID key and your emergency key, checks that the Touch ID login works, and records the server.
+- **An inventory of your access.** Every server you authorize is listed, so you always know where your keys are installed.
+- **An encrypted backup in your cloud.** After every `authorize`, an encrypted copy of the inventory goes to a cloud-synced folder of your choice. Only your emergency kit can open it.
+- **An emergency kit for the day the Mac is gone.** A passphrase-protected key that you keep outside the Mac, already installed on every server, with the steps to get back in from any computer.
+- **Audits.** `audit` checks that every server in the inventory still has both keys.
+- **Standard OpenSSH, nothing to install on servers.** It works with the `ssh` and `git` you already use; servers only need public keys in `authorized_keys`.
+- **No account, no service, no telemetry.** Everything runs on your Mac, and the code is open source.
+
+### Coming next
+
+Here is what is on the way. Star or watch the repository to follow along, and share your ideas in [Discussions](https://github.com/allankz/touchid-ssh-agent/discussions/categories/ideas).
+
+- **Temporary access for AI agents.** One Touch ID before you step away issues a short-lived, tightly scoped SSH certificate, so an agent can keep working overnight or while you are away from the Mac. The server rejects it once it expires, and your main key keeps asking for Touch ID. ([design](docs/phase-2-temporary-credentials.md))
+- **Automated recovery.** From a new Mac, one command opens the inventory with the emergency kit, logs in to every server, installs the new Touch ID key and removes the lost Mac's key.
+
 ## How it works
 
 <p align="center">
@@ -95,12 +119,28 @@ git config --global user.signingkey ~/.touchid-ssh-agent/id_ecdsa_se.pub
 git config --global commit.gpgsign true
 ```
 
+## Upgrading
+
+```bash
+git pull
+make install
+launchctl kickstart -k gui/$(id -u)/local.touchid-ssh-agent
+```
+
+Upgrades are additive. A new version never undoes what you have already set up:
+
+- **Your Touch ID key keeps working.** The Secure Enclave blob is not tied to a particular build of the binary.
+- **Keys already installed on your servers stay valid.** No server needs to be touched after an upgrade.
+- **Your emergency kit, inventory and backup folder keep working.** File formats only gain optional fields, so every later version reads what earlier versions wrote.
+- **New features arrive as new commands or options.** If a change ever needs an action from you, it will be an explicit command you choose to run, never a side effect of upgrading.
+
 ## Emergency kit and inventory
 
 The Touch ID key cannot leave this Mac. If the Mac is lost, stolen or broken, or if your fingerprints change under the `current-set` policy, that key is gone. The emergency kit is how you get back in.
 
-- **The kit is one file**: a passphrase-protected Ed25519 SSH key, followed by recovery instructions. `ssh -i` and `age -i` accept the file as it is.
-- **`setup` shows a random passphrase once** and asks you to retype it, then reveals the kit in Finder. Store the kit outside this Mac (password manager, encrypted drive), preferably apart from the passphrase. Once you type `SAVED`, the copy on the Mac is erased and only the public key stays.
+- **The kit is one file**: an Ed25519 SSH key **encrypted with your emergency passphrase**, followed by plain-text recovery instructions. `ssh -i` and `age -i` accept the file as it is.
+- **The file is useless without the passphrase.** The key is encrypted in OpenSSH's own format with a deliberately slow key derivation (bcrypt, 200 rounds), and the generated passphrase has about 119 bits. So the kit does not need a password manager: a USB drive, an email to yourself or a printout work too, as long as **the passphrase is kept somewhere else**. The instructions part names fingerprints and your backup folder, but no secret.
+- **`setup` shows a random passphrase once** and asks you to retype it, then reveals the kit in Finder. Once you have stored the kit outside this Mac and typed `SAVED`, the copy on the Mac is erased and only the public key stays.
 - **Every `authorize` installs both keys.** The emergency key is never left out.
 - **The inventory** (`~/.touchid-ssh-agent/inventory.json`) lists every authorized server. A copy, `inventory.age`, goes to the backup folder you chose, ideally one synced to the cloud. It is encrypted with age to the emergency key, so this Mac can update it but only the kit can read it. If the Mac is stolen, that copy is how you find your servers again.
 - **`audit`** logs in to every server in the inventory (one Touch ID each) and checks that both keys are still there.
@@ -178,8 +218,8 @@ The Touch ID key is tied to **this** Mac and, with the `current-set` policy, to 
 ## Roadmap
 
 - **Phase 1.5: emergency kit and inventory.** Done; design notes in [`docs/phase-1.5-emergency-kit.md`](docs/phase-1.5-emergency-kit.md).
+- **Automated recovery.** From a new Mac, a command that opens the inventory with the emergency kit, logs in to every server, installs the new Touch ID key and removes the lost Mac's key.
 - **Phase 2: temporary credentials for agents (overnight use).** One Touch ID before bed issues an SSH certificate valid for a few hours, with a restricted scope, signed by a CA kept in the Secure Enclave. The login key keeps asking for Touch ID on every use. Design in [`docs/phase-2-temporary-credentials.md`](docs/phase-2-temporary-credentials.md). Not implemented yet.
-- A menu bar app (SwiftUI) for status, identity creation and history. Requires Xcode.
 
 ## Development
 
