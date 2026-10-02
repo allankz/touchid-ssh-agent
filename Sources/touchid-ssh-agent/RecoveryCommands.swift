@@ -343,7 +343,19 @@ func authorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
     """)
 
     Out.section("1/3 Adding the keys (with your current access to the server)")
-    let report = try RemoteKeys.install(keys, on: target)
+    let report: [String: Bool]
+    do {
+        report = try RemoteKeys.install(keys, on: target)
+    } catch {
+        let portFlag = port.map { " -p \($0)" } ?? ""
+        throw UsageError(description: """
+        could not reach or log in to \(resolved.user)@\(resolved.hostname):\(resolved.port).
+        Check the address and the port, and that your current access works:
+            ssh\(portFlag) \(destination)
+        If the server has a Host alias in ~/.ssh/config, authorize the alias instead,
+        so its port and keys apply. (\(error))
+        """)
+    }
     for key in keys {
         Out.say("  \(key.label == "login" ? "Touch ID key " : "emergency key"): \(report[key.label] == true ? "added" : "already there")")
     }

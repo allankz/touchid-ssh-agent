@@ -365,6 +365,16 @@ test("inventory and settings: round trip, upsert by alias, mode 0600") {
     check(SettingsStore.load(from: paths).backupPath == "/tmp/x", "settings round trip")
 }
 
+test("authorize gives up quickly when the server does not answer") {
+    // 192.0.2.0/24 is reserved for documentation and never answers.
+    let started = Date()
+    let target = SSHTarget(destination: "tester@192.0.2.1", configFile: "/dev/null")
+    let key = AuthorizedKey(label: "login", type: "ssh-ed25519", blob: Data([1]), comment: "x")
+    check(throwsError { _ = try RemoteKeys.install([key], on: target) }, "install fails")
+    let elapsed = Date().timeIntervalSince(started)
+    check(elapsed < Double(SSHTarget.connectTimeout + 15), "failed within the connect timeout: \(Int(elapsed))s")
+}
+
 // MARK: - Emergency kit and inventory backup
 
 print("Emergency kit and inventory backup")
@@ -989,6 +999,30 @@ if runDocker {
         check(audited.status == 0 && audited.stdout.contains("All servers have both keys."), "audit: \(audited.stdout)")
         let listed = try run(cliBinary, ["inventory"], environment: environment)
         check(listed.stdout.contains("e2e-server") && listed.stdout.contains("tester@127.0.0.1"), "inventory list: \(listed.stdout)")
+    }
+
+    test("CLI authorize shows ssh's own questions (new host key) instead of hanging") {
+        // A fresh known_hosts and StrictHostKeyChecking=ask make ssh ask on the
+        // terminal, which used to stop it silently (SIGTTIN) under Process.
+        let asking = work.appendingPathComponent("ssh_config_ask")
+        try (try String(contentsOf: config, encoding: .utf8))
+            .replacingOccurrences(of: "StrictHostKeyChecking no", with: "StrictHostKeyChecking ask")
+            .replacingOccurrences(of: work.appendingPathComponent("known_hosts").path,
+                                  with: work.appendingPathComponent("known_hosts_ask").path)
+            .write(to: asking, atomically: true, encoding: .utf8)
+        let result = try expectScript(#"""
+        set timeout 30
+        spawn $env(CLI) authorize e2e -F $env(CFG) --alias e2e-ask
+        expect {
+          "continue connecting" { send -- "yes\r"; exp_continue }
+          "accepted the Touch ID key" { puts "\nRESULT=ok" }
+          timeout { puts "\nRESULT=hung"; exit 3 }
+          eof { puts "\nRESULT=eof" }
+        }
+        expect eof
+        """#, paths: approving.paths, extra: ["CFG": asking.path], in: work)
+        check(result.stdout.contains("continue connecting"), "ssh's host key question reached the terminal")
+        check(result.stdout.contains("RESULT=ok"), "authorize finished: \(result.stdout.suffix(300))")
     }
 } else {
     print("(real Docker login skipped; use --docker)")

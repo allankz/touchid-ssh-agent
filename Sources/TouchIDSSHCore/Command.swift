@@ -108,6 +108,29 @@ extension Command {
         stdin: Data,
         removingEnvironment: Set<String> = []
     ) throws -> CommandResult {
+        try spawn(executable, arguments, stdin: stdin, newSession: true, inheritStderr: false,
+                  removingEnvironment: removingEnvironment)
+    }
+
+    /// Runs a tool in this process's group, attached to the terminal, so it can
+    /// ask the user things (ssh host key confirmation, passwords, key
+    /// passphrases) on /dev/tty while stdin carries data and stdout is captured.
+    ///
+    /// Foundation's Process starts children in their own process group; a child
+    /// outside the terminal's foreground group is stopped (SIGTTIN) as soon as it
+    /// reads from the terminal, which looked like a silent hang.
+    public static func runAttachedToTerminal(_ executable: String, _ arguments: [String], stdin: Data) throws -> CommandResult {
+        try spawn(executable, arguments, stdin: stdin, newSession: false, inheritStderr: true, removingEnvironment: [])
+    }
+
+    private static func spawn(
+        _ executable: String,
+        _ arguments: [String],
+        stdin: Data,
+        newSession: Bool,
+        inheritStderr: Bool,
+        removingEnvironment: Set<String>
+    ) throws -> CommandResult {
         var inputPipe: [Int32] = [0, 0], outputPipe: [Int32] = [0, 0], errorPipe: [Int32] = [0, 0]
         guard pipe(&inputPipe) == 0, pipe(&outputPipe) == 0, pipe(&errorPipe) == 0 else {
             throw CommandError.launchFailed(executable, "pipe: \(String(cString: strerror(errno)))")
@@ -118,7 +141,12 @@ extension Command {
         defer { posix_spawn_file_actions_destroy(&actions) }
         posix_spawn_file_actions_adddup2(&actions, inputPipe[0], STDIN_FILENO)
         posix_spawn_file_actions_adddup2(&actions, outputPipe[1], STDOUT_FILENO)
-        posix_spawn_file_actions_adddup2(&actions, errorPipe[1], STDERR_FILENO)
+        if inheritStderr {
+            // CLOEXEC_DEFAULT closes every descriptor not named here.
+            posix_spawn_file_actions_addinherit_np(&actions, STDERR_FILENO)
+        } else {
+            posix_spawn_file_actions_adddup2(&actions, errorPipe[1], STDERR_FILENO)
+        }
         for fd in inputPipe + outputPipe + errorPipe {
             posix_spawn_file_actions_addclose(&actions, fd)
         }
@@ -126,7 +154,8 @@ extension Command {
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        let flags = POSIX_SPAWN_CLOEXEC_DEFAULT | (newSession ? POSIX_SPAWN_SETSID : 0)
+        posix_spawnattr_setflags(&attributes, Int16(flags))
 
         let environment = ProcessInfo.processInfo.environment
             .filter { !removingEnvironment.contains($0.key) }
