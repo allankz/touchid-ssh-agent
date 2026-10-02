@@ -225,6 +225,7 @@ The agent only accepts connections from your own user (UID checked on the socket
 - Without `publickey-hostbound`, the agent cannot know the destination. The name shown comes from `known_hosts`, not from a check of its own.
 - The process chain can be stale if the process exited and its PID was reused. That is why it only informs and never decides.
 - One identity per Mac in this version.
+- If a server's host key changes (for example, after a reinstall), run `authorize` or `audit` for it again so the inventory records the new key: `recover` refuses a host key that differs from the recorded one.
 - `ForwardAgent` re-exposes the agent to the remote server. Keep it off, even with Touch ID.
 
 See [`SECURITY.md`](SECURITY.md) for the threat model and how to report a vulnerability.

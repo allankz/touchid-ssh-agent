@@ -410,6 +410,15 @@ func offerSSHConfig(destination: String, suggestedName: String?, resolved: Resol
         Out.say("  ✓ `ssh \(destination)` already uses the Touch ID agent.")
         return nil
     }
+    // An existing Host may already reach this server through the agent.
+    for name in aliases where name != hostPart {
+        if let other = try? RemoteKeys.resolve(SSHTarget(destination: name, configFile: configFile)),
+           other.hostname == resolved.hostname, other.port == resolved.port, other.user == resolved.user,
+           other.usesTouchIDAgent(paths) {
+            Out.say("  ✓ `ssh \(name)` already reaches this server through the Touch ID agent.")
+            return name
+        }
+    }
     let block = { (name: String) in
         SSHConfigFile.block(alias: name, hostname: resolved.hostname, user: resolved.user,
                             port: resolved.port == 22 ? nil : resolved.port, paths: paths)
