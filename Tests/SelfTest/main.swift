@@ -479,7 +479,7 @@ func expectScript(_ body: String, paths: AgentPaths, extra: [String: String] = [
 /// expect fragment: reads the generated passphrase into $pass and retypes it.
 let confirmPassphrase = #"""
 expect {
-  -re {\n    ([2-9a-z]{4}(-[2-9a-z]{4}){5})\r} { set pass $expect_out(1,string) }
+  -re {([2-9a-z]{4}(-[2-9a-z]{4}){5})} { set pass $expect_out(1,string) }
   timeout { puts "NO_PASSPHRASE"; exit 2 }
 }
 expect "Retype the passphrase"

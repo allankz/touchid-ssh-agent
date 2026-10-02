@@ -231,7 +231,7 @@ public enum EmergencyKitBuilder {
 
         The block above is your emergency SSH private key, encrypted with your
         emergency passphrase. Keep this file outside your Mac (password manager,
-        encrypted USB drive). Keep the passphrase in a different place if you can.
+        USB drive, an email to yourself) and keep the passphrase somewhere else.
 
         Created:           \(details.createdOn)
         Emergency key:     \(recoveryKey.fingerprint) (\(recoveryKey.type))
