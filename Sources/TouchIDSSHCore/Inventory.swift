@@ -46,11 +46,14 @@ public struct InventoryEntry: Codable, Equatable {
     public var authorizedAt: Date
     public var lastAudit: Date?
     public var lastAuditResult: String?
+    /// Server host keys (`type base64`) as trusted when the entry was
+    /// recorded, so a recovery from a new Mac can verify the server.
+    public var hostKeys: [String]?
 
     public init(
         alias: String, destination: String, hostname: String, user: String, port: Int,
         sshConfigFile: String?, loginKeyFingerprint: String, recoveryKeyFingerprint: String,
-        authorizedAt: Date, lastAudit: Date? = nil, lastAuditResult: String? = nil
+        authorizedAt: Date, lastAudit: Date? = nil, lastAuditResult: String? = nil, hostKeys: [String]? = nil
     ) {
         self.alias = alias
         self.destination = destination
@@ -63,6 +66,7 @@ public struct InventoryEntry: Codable, Equatable {
         self.authorizedAt = authorizedAt
         self.lastAudit = lastAudit
         self.lastAuditResult = lastAuditResult
+        self.hostKeys = hostKeys
     }
 }
 
@@ -88,6 +92,13 @@ public struct Inventory: Codable, Equatable {
             servers.append(entry)
         }
         updatedAt = .wholeSecondsNow
+    }
+}
+
+extension Inventory {
+    /// Parses an inventory as written by `InventoryStore` or decrypted from a backup.
+    public static func decode(_ data: Data) throws -> Inventory {
+        try JSON.decoder.decode(Inventory.self, from: data)
     }
 }
 
@@ -203,7 +214,7 @@ enum JSON {
 
     static func encode<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         encoder.dateEncodingStrategy = .iso8601
         return try encoder.encode(value) + Data("\n".utf8)
     }

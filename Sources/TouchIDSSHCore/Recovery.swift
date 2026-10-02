@@ -124,7 +124,7 @@ public enum EmergencyKitBuilder {
     static let keyFileName = "emergency-key"
     /// ssh-keygen falls back to an askpass helper when these are set, which
     /// would bypass the passphrase written to its stdin.
-    static let askpassVariables: Set<String> = ["SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "DISPLAY"]
+    public static let askpassVariables: Set<String> = ["SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "DISPLAY"]
 
     public struct Details {
         public var createdAt: Date
@@ -240,8 +240,19 @@ public enum EmergencyKitBuilder {
 
         IF YOUR MAC IS LOST, STOLEN OR BROKEN
 
-        1. On any computer with OpenSSH and age (https://age-encryption.org),
-           save this file as emergency-kit.txt and run:
+        On a Mac (the quick way):
+        1. Install touchid-ssh-agent:
+             git clone https://github.com/allankz/touchid-ssh-agent
+             cd touchid-ssh-agent && make install
+        2. Run it with this file:
+             touchid-ssh-agent recover emergency-kit.txt
+           It opens the inventory, installs the new Mac's keys on every
+           server, removes the lost Mac's key and this emergency key, and
+           finishes with an audit. For security it asks for the passphrase
+           twice: once to open the inventory, once to load this key.
+
+        On any other computer, with OpenSSH and age (https://age-encryption.org):
+        1. Save this file as emergency-kit.txt and run:
              chmod 600 emergency-kit.txt
         2. Download inventory.age from the backup folder above and read the
            server list (asks for the passphrase):
@@ -255,6 +266,10 @@ public enum EmergencyKitBuilder {
            kit, then `touchid-ssh-agent authorize` for every server.
         6. Remove this emergency key from the servers afterwards: once it has
            been used, treat it as exposed.
+
+        To check now and then that this kit still opens every server, without
+        changing anything:
+             touchid-ssh-agent recovery test emergency-kit.txt
 
         """
     }

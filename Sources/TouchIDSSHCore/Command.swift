@@ -51,13 +51,16 @@ public enum Command {
         _ arguments: [String],
         stdin: Data? = nil,
         inheritStderr: Bool = false,
+        environment overrides: [String: String] = [:],
         removingEnvironment: Set<String> = []
     ) throws -> CommandResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
-        if !removingEnvironment.isEmpty {
-            process.environment = ProcessInfo.processInfo.environment.filter { !removingEnvironment.contains($0.key) }
+        if !removingEnvironment.isEmpty || !overrides.isEmpty {
+            process.environment = ProcessInfo.processInfo.environment
+                .filter { !removingEnvironment.contains($0.key) }
+                .merging(overrides) { $1 }
         }
 
         let output = Pipe()
@@ -109,7 +112,7 @@ extension Command {
         removingEnvironment: Set<String> = []
     ) throws -> CommandResult {
         try spawn(executable, arguments, stdin: stdin, newSession: true, inheritStderr: false,
-                  removingEnvironment: removingEnvironment)
+                  environment: [:], removingEnvironment: removingEnvironment)
     }
 
     /// Runs a tool in this process's group, attached to the terminal, so it can
@@ -119,8 +122,15 @@ extension Command {
     /// Foundation's Process starts children in their own process group; a child
     /// outside the terminal's foreground group is stopped (SIGTTIN) as soon as it
     /// reads from the terminal, which looked like a silent hang.
-    public static func runAttachedToTerminal(_ executable: String, _ arguments: [String], stdin: Data) throws -> CommandResult {
-        try spawn(executable, arguments, stdin: stdin, newSession: false, inheritStderr: true, removingEnvironment: [])
+    public static func runAttachedToTerminal(
+        _ executable: String,
+        _ arguments: [String],
+        stdin: Data,
+        environment: [String: String] = [:],
+        removingEnvironment: Set<String> = []
+    ) throws -> CommandResult {
+        try spawn(executable, arguments, stdin: stdin, newSession: false, inheritStderr: true,
+                  environment: environment, removingEnvironment: removingEnvironment)
     }
 
     private static func spawn(
@@ -129,6 +139,7 @@ extension Command {
         stdin: Data,
         newSession: Bool,
         inheritStderr: Bool,
+        environment overrides: [String: String],
         removingEnvironment: Set<String>
     ) throws -> CommandResult {
         var inputPipe: [Int32] = [0, 0], outputPipe: [Int32] = [0, 0], errorPipe: [Int32] = [0, 0]
@@ -159,6 +170,7 @@ extension Command {
 
         let environment = ProcessInfo.processInfo.environment
             .filter { !removingEnvironment.contains($0.key) }
+            .merging(overrides) { $1 }
             .map { "\($0.key)=\($0.value)" }
         var argv = ([executable] + arguments).map { strdup($0) } + [nil]
         var envp = environment.map { strdup($0) } + [nil]

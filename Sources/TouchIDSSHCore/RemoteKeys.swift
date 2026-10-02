@@ -40,15 +40,35 @@ public struct SSHTarget: Equatable {
     }
 }
 
+/// The effective configuration ssh would use for a destination (`ssh -G`).
 public struct ResolvedTarget: Equatable {
     public let hostname: String
     public let user: String
     public let port: Int
+    public var identityAgent: String? = nil
+    public var identityFiles: [String] = []
+    public var identitiesOnly = false
+    public var userKnownHostsFiles: [String] = []
+    public var hostKeyAlias: String? = nil
 
     public init(hostname: String, user: String, port: Int) {
         self.hostname = hostname
         self.user = user
         self.port = port
+    }
+
+    /// The name known_hosts files use for this server.
+    public var knownHostsName: String {
+        hostKeyAlias ?? (port == 22 ? hostname : "[\(hostname)]:\(port)")
+    }
+
+    /// True when ssh would sign with the Touch ID agent's key for this destination.
+    public func usesTouchIDAgent(_ paths: AgentPaths) -> Bool {
+        func expand(_ path: String) -> String {
+            URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL.path
+        }
+        guard let agent = identityAgent, expand(agent) == paths.socket.standardizedFileURL.path else { return false }
+        return identitiesOnly && identityFiles.map(expand).contains(paths.publicKeyFile.standardizedFileURL.path)
     }
 }
 
@@ -120,9 +140,12 @@ public enum RemoteKeys {
             throw RemoteKeysError.resolveFailed(result.stderrText.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         var values: [String: String] = [:]
+        var identityFiles: [String] = []
         for line in result.stdoutText.split(whereSeparator: \.isNewline) {
             let parts = line.split(separator: " ", maxSplits: 1)
-            if parts.count == 2, values[String(parts[0])] == nil {
+            guard parts.count == 2 else { continue }
+            if parts[0] == "identityfile" { identityFiles.append(String(parts[1])) }
+            if values[String(parts[0])] == nil {
                 values[String(parts[0])] = String(parts[1])
             }
         }
@@ -130,7 +153,14 @@ public enum RemoteKeys {
               let port = values["port"].flatMap(Int.init) else {
             throw RemoteKeysError.resolveFailed("unexpected ssh -G output")
         }
-        return ResolvedTarget(hostname: hostname, user: user, port: port)
+        var resolved = ResolvedTarget(hostname: hostname, user: user, port: port)
+        resolved.identityAgent = values["identityagent"].flatMap { $0 == "none" ? nil : $0 }
+        resolved.identityFiles = identityFiles
+        resolved.identitiesOnly = values["identitiesonly"] == "yes"
+        resolved.userKnownHostsFiles = (values["userknownhostsfile"] ?? "~/.ssh/known_hosts")
+            .split(separator: " ").map(String.init)
+        resolved.hostKeyAlias = values["hostkeyalias"]
+        return resolved
     }
 
     /// Appends each key unless its base64 blob is already present. Fixes a
