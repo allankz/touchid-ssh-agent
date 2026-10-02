@@ -30,8 +30,13 @@ public struct SSHTarget: Equatable {
         self.bootstrapArguments = bootstrapArguments
     }
 
+    /// Seconds ssh waits for the server to answer before giving up, so an
+    /// unreachable host or a wrong port fails fast instead of hanging.
+    public static let connectTimeout = 15
+
     var baseArguments: [String] {
         (configFile.map { ["-F", $0] } ?? []) + (port.map { ["-p", String($0)] } ?? [])
+            + ["-o", "ConnectTimeout=\(SSHTarget.connectTimeout)"]
     }
 }
 
@@ -174,11 +179,10 @@ public enum RemoteKeys {
     /// (password, another key, ssh_config). ssh's prompts go to the terminal.
     /// Returns label → true if the key was added, false if it was already there.
     public static func install(_ keys: [AuthorizedKey], on target: SSHTarget) throws -> [String: Bool] {
-        let result = try Command.run(
+        let result = try Command.runAttachedToTerminal(
             ssh,
             target.baseArguments + target.bootstrapArguments + [target.destination, "sh -s"],
-            stdin: Data(installScript(keys).utf8),
-            inheritStderr: true
+            stdin: Data(installScript(keys).utf8)
         )
         let report = parse(result.stdoutText)
         guard result.succeeded, keys.allSatisfy({ report[$0.label] != nil }) else {
