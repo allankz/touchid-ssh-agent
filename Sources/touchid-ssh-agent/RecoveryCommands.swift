@@ -265,7 +265,10 @@ func askBackupFolder(paths: AgentPaths) throws {
     let suggestion = suggestedBackupFolder()
     let defaultHint = suggestion.map { " [\(paths.displayPath(URL(fileURLWithPath: $0)))]" } ?? ""
     while true {
-        let answer = Terminal.ask("Backup folder\(defaultHint), or 'skip': ")?.trimmingCharacters(in: .whitespaces) ?? "skip"
+        guard let raw = Terminal.ask("Backup folder\(defaultHint), or 'skip': ") else {
+            throw UsageError(description: "setup cancelled (end of input)")
+        }
+        let answer = raw.trimmingCharacters(in: .whitespaces)
         if answer.lowercased() == "skip" {
             print("Without a backup folder the inventory only lives on this Mac and is lost with it.")
             if Terminal.confirm(word: "SKIP", cancelWord: "BACK", prompt: "Type SKIP to continue without one (or BACK to choose a folder): ") {
