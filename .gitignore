@@ -12,3 +12,8 @@
 
 # Private design notes.
 _docs/
+
+# Never commit emergency kits, inventory backups or scratch folders.
+tmp/
+*.age
+emergency-kit*.txt

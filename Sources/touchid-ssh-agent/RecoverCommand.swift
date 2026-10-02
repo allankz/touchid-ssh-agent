@@ -107,6 +107,17 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
         (for example, fingerprints changed), delete it first with `\(tool) delete`.
         """)
     }
+    // With another TOUCHID_SSH_AGENT_DIR, the Mac's main key would not be seen
+    // above, and recover would remove it from the servers.
+    if !paths.isDefault, let main = try? IdentityStore.load(from: AgentPaths(directory: AgentPaths.defaultDirectory)),
+       old.servers.contains(where: { $0.loginKeyFingerprint == main.fingerprint }) {
+        throw UsageError(description: """
+        this Mac's main Touch ID key (\(main.fingerprint), in \(AgentPaths(directory: AgentPaths.defaultDirectory).displayPath(AgentPaths.defaultDirectory)))
+        is the one the inventory lists. recover is for a new Mac: running it here with another
+        directory would remove this Mac's key from the servers. To rehearse a recovery on this
+        Mac, run `\(tool) recovery test emergency-kit.txt`, which changes nothing.
+        """)
+    }
     Out.say("  \(identity.fingerprint)")
     try ensureAgentRunning(paths: paths)
 
@@ -380,6 +391,14 @@ func preserveOldBackup(_ inventoryFile: URL, paths: AgentPaths) {
 /// recover checks the Touch ID login on every server, so the agent must run.
 func ensureAgentRunning(paths: AgentPaths) throws {
     guard !AgentClient.isListening(socketPath: paths.socket.path) else { return }
+    // The LaunchAgent label is shared, so installing it here would repoint this
+    // Mac's real agent to another directory.
+    guard paths.isDefault else {
+        throw UsageError(description: """
+        no agent is running for \(paths.displayPath(paths.directory)). Start one in another
+        terminal with `TOUCHID_SSH_AGENT_DIR=\(Terminal.shellQuoted(paths.directory.path)) \(tool) agent`.
+        """)
+    }
     guard let executable = Bundle.main.executableURL?.resolvingSymlinksInPath().path,
           !executable.contains("/.build/") else {
         throw UsageError(description: "the agent is not running. Run `\(tool) install` first.")

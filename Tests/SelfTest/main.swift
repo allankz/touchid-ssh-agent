@@ -590,6 +590,37 @@ test("recovery create: three wrong retypes or ABORT configure nothing") {
     check(!FileManager.default.fileExists(atPath: paths.kitDirectory.path), "kit erased after abort")
 }
 
+test("recover refuses another directory on a Mac whose main key is in the inventory") {
+    let mainPaths = AgentPaths(directory: AgentPaths.defaultDirectory)
+    guard let main = try? IdentityStore.load(from: mainPaths) else {
+        print("    (skipped: this Mac has no main identity)")
+        return
+    }
+    let directory = try makeTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let paths = AgentPaths(directory: directory.appendingPathComponent("a"))
+    try IdentityStore.createWithoutUserPresenceForTesting(in: paths)
+    let kit = try plainKit(in: directory, name: "kit")
+    let folder = directory.appendingPathComponent("cloud")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+    let source = AgentPaths(directory: directory.appendingPathComponent("source"))
+    try RecoveryStore.importPublicKey(from: kit.publicKey, into: source, replace: false)
+    var inventory = Inventory(mac: "this mac")
+    inventory.upsert(InventoryEntry(alias: "web", destination: "web", hostname: "server.example", user: "deploy", port: 22,
+                                    sshConfigFile: nil, loginKeyFingerprint: main.fingerprint, recoveryKeyFingerprint: "SHA256:x",
+                                    authorizedAt: Date()))
+    try InventoryStore.save(inventory, to: source)
+    InventoryBackup.export(paths: source, settings: AgentSettings(backupPath: folder.path))
+    let result = try expectScript(#"""
+    spawn $env(CLI) recover $env(KIT) --inventory $env(INV)
+    expect eof
+    catch wait result
+    puts "\nEXIT=[lindex $result 3]"
+    """#, paths: paths, extra: ["KIT": kit.kit.path, "INV": folder.appendingPathComponent(InventoryBackup.fileName).path], in: directory)
+    check(result.stdout.contains("main Touch ID key") && result.stdout.contains("EXIT=1"), "refused: \(result.stdout.suffix(400))")
+    check(!result.stdout.contains("Type RECOVER"), "stopped before touching any server")
+}
+
 test("setup: backup folder, new kit, and age opens the backup with the passphrase-protected kit") {
     guard let age = agePath else {
         check(false, "age is not installed (brew install age)")
