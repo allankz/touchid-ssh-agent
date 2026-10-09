@@ -39,7 +39,7 @@ This is a personal project maintained on a best-effort basis. The goals are to a
 - **root or kernel compromise** of the Mac.
 - **Compromised servers**, or agent forwarding to them. Keep `ForwardAgent` off.
 - **Destination checks without `publickey-hostbound`.** For older servers the agent cannot know where a signature will be used. The process chain shown in the prompt is informational and can be stale.
-- **Loss of availability.** The Touch ID key is gone if the Mac fails, if fingerprints change under the `current-set` policy, or after `delete`. The emergency kit covers this only if it was stored outside the Mac.
+- **Loss of availability.** The Touch ID key is gone if the Mac fails, if fingerprints change under the `current-set` policy, or after `deauthorize --all` deletes it. The emergency kit covers this only if it was stored outside the Mac.
 - **Theft of the emergency kit together with its passphrase.** The emergency key is a regular software key: whoever has the kit and the passphrase can log in to every server that trusts it, without Touch ID. Its protection is the passphrase (about 119 bits when generated, bcrypt KDF with 200 rounds) and keeping the kit off the Mac, ideally apart from the passphrase.
 - **A man in the middle during recovery** for servers whose host key was never recorded (entries recorded before host keys were stored, until their next `audit`).
 - **Reading the local inventory on a stolen Mac.** `inventory.json` is plain JSON (mode `0600`) so the agent can use it without a passphrase. FileVault protects it at rest; `status` warns when FileVault is off.
@@ -64,6 +64,7 @@ This is a personal project maintained on a best-effort basis. The goals are to a
   - Every server is checked with the emergency key before anything changes, and no server is changed until the user types `RECOVER`.
   - On each server, this Mac's keys are added first. The old keys are removed only after the new Touch ID key has logged in, only when their fingerprint matches the lost Mac's key, or the used emergency key when the user chose to replace it, exactly, and never when they are this Mac's keys.
   - If any server fails, its old keys stay, the cloud backup is not replaced, and the old kit keeps working for another run.
+- **deauthorize**: removes only the `authorized_keys` lines holding this Mac's Touch ID key or emergency key, matched by the exact key, keeping the file's inode and permissions. When no other key would be left, nothing is written until the user confirms, because the server would then accept only a password or console access.
 - **ssh config edits**: only after the user confirms. New `Host` blocks are appended; when lines are added to an existing block, the previous file is saved next to it as `.touchid-backup` first.
 - **authorize and audit**: keys are appended by a small POSIX `sh` script that matches existing keys by blob, fixes a missing final newline and quotes only a restricted character set. The Touch ID check disables connection sharing (`ControlPath=none`), uses `BatchMode`, and confirms from `ssh -v` that the server accepted the Touch ID key's fingerprint, so another configured key cannot pass for it.
 

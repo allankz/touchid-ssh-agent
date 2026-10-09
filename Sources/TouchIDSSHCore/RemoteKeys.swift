@@ -221,6 +221,50 @@ public enum RemoteKeys {
         return report.mapValues { $0 == "added" }
     }
 
+    /// Runs `script` with the user's own access to `target` (this agent, another
+    /// key or a password), with ssh's prompts on the terminal.
+    public static func runWithUserAccess(_ script: String, on target: SSHTarget) throws -> (ok: Bool, output: String) {
+        let result = try Command.runAttachedToTerminal(
+            ssh,
+            target.baseArguments + target.bootstrapArguments + [target.destination, "sh -s"],
+            stdin: Data(script.utf8)
+        )
+        return (result.succeeded, result.stdoutText)
+    }
+
+    /// Removes the lines holding `keys` (matched by blob) from authorized_keys,
+    /// reporting `found` or `absent` for each label, then lists what is left.
+    /// Unless `allowEmpty`, nothing is written when no other key would remain:
+    /// the script reports `refused empty` so the user can decide.
+    public static func deauthorizeScript(_ keys: [AuthorizedKey], allowEmpty: Bool) -> String {
+        var script = """
+        set -e
+        f="$HOME/.ssh/authorized_keys"
+        if [ ! -f "$f" ]; then
+
+        """
+        for key in keys { script += "  echo '\(marker) absent \(key.label)'\n" }
+        script += "  \(listing.split(separator: "\n").joined(separator: "\n  "))\n  exit 0\nfi\n"
+        script += """
+        umask 077
+        t="$f.touchid.$$"
+        cp "$f" "$t"
+        found=0
+
+        """
+        for key in keys {
+            script += "if grep -qF '\(key.base64)' \"$t\"; then echo '\(marker) found \(key.label)'; found=1; "
+                + "grep -vF '\(key.base64)' \"$t\" > \"$t.n\" || true; mv \"$t.n\" \"$t\"; "
+                + "else echo '\(marker) absent \(key.label)'; fi\n"
+        }
+        if !allowEmpty {
+            script += "if [ \"$found\" = 1 ] && ! grep -qvE '^[[:space:]]*(#|$)' \"$t\"; then "
+                + "rm -f \"$t\"; echo '\(marker) refused empty'; exit 0; fi\n"
+        }
+        script += "if [ \"$found\" = 1 ]; then cat \"$t\" > \"$f\"; fi\nrm -f \"$t\"\n" + listing
+        return script
+    }
+
     /// Logs in with the Touch ID key only and confirms from ssh's debug output
     /// that the server accepted that key. Costs one Touch ID approval.
     public static func verifyLogin(on target: SSHTarget, paths: AgentPaths, identity: StoredIdentity) -> LoginCheck {

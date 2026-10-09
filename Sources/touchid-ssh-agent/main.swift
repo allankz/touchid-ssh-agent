@@ -7,46 +7,64 @@ import TouchIDSSHCore
 let version = "0.1.0"
 let tool = "touchid-ssh-agent"
 
-let usage = """
-\(tool) \(version) — SSH agent with a Secure Enclave key and Touch ID for every signature
-
-Usage:
-  \(tool) setup [--biometry current-set|any] [--comment TEXT]
-        Guided setup: Touch ID key, backup folder and emergency kit.
-  \(tool) authorize [user@]host [-p PORT] [-F SSH_CONFIG] [--alias NAME] [-- SSH_ARGS]
-        Installs the Touch ID key and the emergency key on a server, checks
-        the Touch ID login and updates the inventory and its backup.
-  \(tool) audit [ALIAS...]  Checks that every server in the inventory has both keys.
-  \(tool) inventory       Lists the servers in the inventory.
-  \(tool) set backup-path DIR|none
-        Folder (ideally synced to the cloud) for the encrypted inventory.
-  \(tool) recovery create [--replace] [--own-passphrase]
-        Creates a new emergency kit (passphrase-protected key, kept off this Mac).
-  \(tool) recovery import FILE.pub [--replace]
-        Uses an emergency key you already have; only its public key is copied.
-  \(tool) recovery test emergency-kit.txt [--inventory FILE]
-        Checks that the emergency kit still logs in to every server. Changes nothing.
-  \(tool) recover emergency-kit.txt [--inventory FILE] [--keep-emergency-key]
-        On a new Mac: opens the inventory with the kit, installs this Mac's keys on
-        every server, removes the lost Mac's key, then audits.
-  \(tool) recovery pubkey Prints the emergency public key.
-  \(tool) create [--comment TEXT] [--biometry current-set|any]
-        Creates only the Touch ID key. Default: current-set (adding or removing
-        a fingerprint invalidates the key; the emergency key covers that).
-  \(tool) pubkey          Prints the public key (authorized_keys line).
-  \(tool) fingerprint     Prints the SHA256 fingerprint of the public key.
-  \(tool) status          Diagnostics: Secure Enclave, Touch ID, identity and agent.
-  \(tool) config ALIAS --host HOST [--user USER] [--port PORT]
-        Prints a ~/.ssh/config block. Does not change any file.
-  \(tool) agent           Runs the agent in the foreground.
-  \(tool) install [--force]
-        Registers the agent as a LaunchAgent (starts with your session).
-  \(tool) uninstall       Removes the LaunchAgent. The identity is kept.
-  \(tool) delete          Deletes the identity irreversibly.
-
-Directory: \(AgentPaths.defaultDirectory.path) (or $\(AgentPaths.environmentVariable)).
-Time to approve Touch ID: 60 s (or $TOUCHID_SSH_AGENT_PROMPT_TIMEOUT).
-"""
+/// The help text, grouped by what the user is doing.
+var usage: String {
+    func section(_ title: String, _ lines: String) -> String { Out.bold(title) + "\n" + lines }
+    return [
+        "\(tool) \(version) — SSH agent with a Secure Enclave key and Touch ID for every signature",
+        "Usage: \(tool) COMMAND [OPTIONS]",
+        section("Getting started", """
+          setup [--biometry current-set|any] [--comment TEXT]
+                            Guided setup: Touch ID key, backup folder and emergency kit.
+          install [--force] Starts the agent with your session (LaunchAgent).
+          authorize [user@]host [-p PORT] [-F SSH_CONFIG] [--alias NAME] [-- SSH_ARGS]
+                            Installs both keys on a server, checks the Touch ID login,
+                            offers a ~/.ssh/config block and updates the inventory.
+        """),
+        section("Day to day", """
+          status            Secure Enclave, Touch ID, keys, agent, backup and inventory.
+          inventory         Lists the servers in the inventory.
+          audit [NAME...]   Checks that every server still has both keys (one Touch ID each).
+          deauthorize NAME... | --all [-F SSH_CONFIG] [-p PORT] [-- SSH_ARGS]
+                            Removes this Mac's keys from servers and drops them from the
+                            inventory. --all does every server, then offers to delete
+                            this Mac's Touch ID key.
+          config NAME --host HOST [--user USER] [--port PORT]
+                            Prints a ~/.ssh/config block. Changes no file.
+          set backup-path DIR|none
+                            Folder, ideally synced to the cloud, for the encrypted inventory.
+        """),
+        section("New Mac and recovery", """
+          migrate           Shows, with this Mac's data, how to move to a new Mac.
+          recovery test KIT [--inventory FILE] [-F SSH_CONFIG]
+                            Checks that the emergency kit still opens every server.
+                            Changes nothing.
+          recover KIT [--inventory FILE] [-F SSH_CONFIG] [--keep-emergency-key]
+                            On a new Mac: moves every server to this Mac, then audits.
+          recovery create [--replace] [--own-passphrase]
+                            Creates a new emergency kit (kept off this Mac).
+          recovery import FILE.pub [--replace]
+                            Uses an emergency key you already have; only its public key
+                            is copied.
+          recovery pubkey   Prints the emergency public key.
+        """),
+        section("Advanced", """
+          create [--comment TEXT] [--biometry current-set|any]
+                            Creates only the Touch ID key. Default: current-set (adding or
+                            removing a fingerprint invalidates the key; the emergency key
+                            covers that).
+          pubkey            Prints the Touch ID public key (authorized_keys line).
+          fingerprint       Prints its SHA256 fingerprint.
+          agent             Runs the agent in the foreground.
+          uninstall         Removes the LaunchAgent. The keys are kept.
+          version           Prints the version.
+        """),
+        """
+        Directory: \(AgentPaths.defaultDirectory.path) (or $\(AgentPaths.environmentVariable)).
+        Time to approve Touch ID: 60 s (or $TOUCHID_SSH_AGENT_PROMPT_TIMEOUT).
+        """,
+    ].joined(separator: "\n\n")
+}
 
 struct UsageError: Error, CustomStringConvertible {
     let description: String
@@ -264,22 +282,9 @@ func install(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
 
 func uninstall() throws {
     try LaunchAgent.uninstall()
-    Out.say("LaunchAgent removed. The identity stays on disk; use `\(tool) delete` to delete it.")
+    Out.say("LaunchAgent removed. The keys stay on this Mac; `\(tool) deauthorize --all` takes them off your servers.")
 }
 
-func delete(paths: AgentPaths) throws {
-    let identity = requireIdentity(paths)
-    Out.say("""
-    This permanently deletes the identity \(identity.fingerprint) (\(identity.comment)).
-    Servers that only accept this key will stop accepting your login.
-    """)
-    guard Terminal.ask("Type DELETE to confirm: ") == "DELETE" else {
-        Out.say("Nothing was deleted.")
-        return
-    }
-    try IdentityStore.delete(from: paths)
-    Out.say("Identity deleted.")
-}
 
 // MARK: - Entry point
 
@@ -315,7 +320,14 @@ do {
     case "agent": try runAgent(paths: paths)
     case "install": try install(rest, paths: paths)
     case "uninstall": try uninstall()
-    case "delete": try delete(paths: paths)
+    case "deauthorize": try deauthorize(rest, paths: paths)
+    case "migrate": try migrate(paths: paths)
+    case "delete":
+        // Replaced by deauthorize --all; kept so the old name explains where it went.
+        throw UsageError(description: """
+        `delete` was replaced by `\(tool) deauthorize --all`, which first removes this
+        Mac's keys from your servers and then offers to delete the Touch ID key.
+        """)
     case "version", "--version": print(version)
     case nil, "help", "--help", "-h": Out.say(usage)
     case let command?: throw UsageError(description: "unknown command: \(command)\n\n\(usage)")

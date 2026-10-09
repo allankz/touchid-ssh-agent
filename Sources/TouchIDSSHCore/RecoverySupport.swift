@@ -100,6 +100,12 @@ extension RemoteKeys {
 
     """
 
+    /// True when `output` holds a complete `listing`.
+    public static func containsListing(_ output: String) -> Bool {
+        guard let start = output.range(of: listBegin + "\n") else { return false }
+        return output.range(of: listEnd, range: start.upperBound..<output.endIndex) != nil
+    }
+
     /// Lines of authorized_keys printed by `listing`.
     public static func listedLines(_ output: String) -> [String] {
         guard let start = output.range(of: listBegin + "\n"),

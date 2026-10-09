@@ -69,6 +69,14 @@ Run on a new Mac with the old kit: `touchid-ssh-agent recover emergency-kit.txt`
 
 If every server moved, a new backup replaces the old one. When the key was replaced, the previous backup is first kept as `inventory-before-recovery-DATE.age`, since only the old kit opens it. If any server failed, its old keys stay, the backup is not replaced, and the old kit keeps working for another run.
 
+### deauthorize
+
+`deauthorize NAME...` or `--all` takes this Mac's keys off servers, through the user's usual ssh access (extra ssh options after `--`). A POSIX `sh` script removes the lines holding this Mac's Touch ID key or emergency key, matched by the exact key, and lists what is left. If no other key would remain, it writes nothing and reports it, and the user decides whether to go ahead. Servers that were cleaned leave the inventory, and the backup is rewritten even when the inventory becomes empty. Only this Mac's current keys can be removed: when an entry recorded other fingerprints, it says so. `--all` ends by offering to delete the Touch ID key, which replaces the old `delete` command.
+
+### migrate
+
+Read-only. It shows this Mac's keys, backup folder and servers, warns about what `recover` would miss (no emergency key, no backup folder or a stale `inventory.age`, a folder that does not look synced, entries with other keys or no host key), and prints the steps for both Macs.
+
 ### recovery test
 
 The same first steps without changing anything: it opens the inventory, loads the kit and logs in to every server with the emergency key only. Unknown host keys go to a scratch file, so not even `known_hosts` changes.

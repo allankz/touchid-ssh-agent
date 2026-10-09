@@ -278,7 +278,7 @@ func refuseKeysInUse(_ inventory: Inventory, identity: StoredIdentity?, paths: A
         throw UsageError(description: """
         this Mac's Touch ID key (\(identity.fingerprint)) is the one the inventory lists,
         so recovering would remove the key this Mac is using. If it stopped working
-        (for example, fingerprints changed), delete it first with `\(tool) delete`.
+        (for example, fingerprints changed), move \(paths.displayPath(paths.directory)) aside and run recover again.
         """)
     }
     // With another TOUCHID_SSH_AGENT_DIR, the Mac's main key would not be seen
