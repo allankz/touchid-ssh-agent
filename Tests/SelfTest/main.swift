@@ -640,6 +640,32 @@ test("recovery create: three wrong retypes or ABORT configure nothing") {
     check(!FileManager.default.fileExists(atPath: paths.kitDirectory.path), "kit erased after abort")
 }
 
+test("help is grouped by task, delete points to deauthorize, migrate warns and lists the steps") {
+    let directory = try makeTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let paths = AgentPaths(directory: directory.appendingPathComponent("a"))
+    let environment = [AgentPaths.environmentVariable: paths.directory.path]
+    let help = try run(cliBinary, ["help"], environment: environment).stdout
+    check(["Getting started", "Day to day", "New Mac and recovery", "Advanced", "deauthorize", "migrate"].allSatisfy(help.contains),
+          "sections and new commands: \(help.prefix(300))")
+    let deleted = try run(cliBinary, ["delete"], environment: environment)
+    check(deleted.status != 0 && deleted.stderr.contains("deauthorize --all"), "delete points to deauthorize: \(deleted.stderr)")
+
+    let identity = try IdentityStore.createWithoutUserPresenceForTesting(in: paths)
+    var inventory = Inventory(mac: "this mac")
+    inventory.upsert(InventoryEntry(alias: "web", destination: "web", hostname: "server.example", user: "deploy", port: 2222,
+                                    sshConfigFile: nil, loginKeyFingerprint: identity.fingerprint, recoveryKeyFingerprint: "SHA256:x",
+                                    authorizedAt: Date()))
+    try InventoryStore.save(inventory, to: paths)
+    let before = try Data(contentsOf: paths.inventoryFile)
+    let migrate = try run(cliBinary, ["migrate"], environment: environment)
+    check(migrate.status == 0, "migrate ran: \(migrate.stderr)")
+    for expected in ["No emergency key", "No backup folder", "web has no host key recorded", "On the new Mac", "recover emergency-kit.txt"] {
+        check(migrate.stdout.contains(expected), "migrate says: \(expected)")
+    }
+    check(try Data(contentsOf: paths.inventoryFile) == before, "migrate changed nothing")
+}
+
 test("recover refuses another directory on a Mac whose main key is in the inventory") {
     let mainPaths = AgentPaths(directory: AgentPaths.defaultDirectory)
     guard let main = try? IdentityStore.load(from: mainPaths) else {
