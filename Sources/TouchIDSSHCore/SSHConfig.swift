@@ -90,11 +90,19 @@ extension String {
 public enum HostKeys {
     /// `type base64` entries ssh already trusts for `resolved`.
     public static func known(for resolved: ResolvedTarget) -> [String] {
+        let keys = entries(named: resolved.knownHostsName, in: resolved.userKnownHostsFiles)
+        // On another port, ssh also accepts keys recorded under the bare
+        // hostname when there are none for `[host]:port`.
+        guard keys.isEmpty, resolved.hostKeyAlias == nil, resolved.port != 22 else { return keys }
+        return entries(named: resolved.hostname, in: resolved.userKnownHostsFiles)
+    }
+
+    private static func entries(named name: String, in files: [String]) -> [String] {
         var keys: [String] = []
-        for file in resolved.userKnownHostsFiles {
+        for file in files {
             let path = file.expandingTildeInPathString
             guard FileManager.default.fileExists(atPath: path),
-                  let result = try? Command.run("/usr/bin/ssh-keygen", ["-F", resolved.knownHostsName, "-f", path]) else { continue }
+                  let result = try? Command.run("/usr/bin/ssh-keygen", ["-F", name, "-f", path]) else { continue }
             for line in result.stdoutText.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
                 let fields = line.split(separator: " ")
                 if fields.count >= 3 { keys.append("\(fields[1]) \(fields[2])") }

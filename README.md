@@ -182,23 +182,46 @@ Then remove the lost Mac's login key from each server (`ssh-keygen -lf ~/.ssh/au
 
 ## Commands
 
+`touchid-ssh-agent help` groups the commands the same way.
+
+**Getting started**
+
 | Command | What it does |
 | --- | --- |
 | `setup [--biometry current-set\|any] [--comment T]` | Guided setup: Touch ID key, backup folder, emergency kit. |
-| `authorize [user@]host [-p P] [-F FILE] [--alias A] [-- SSH_ARGS]` | Installs both keys, checks the Touch ID login, updates the inventory and its backup. |
-| `audit [ALIAS...]` / `inventory` | Checks both keys and the ssh config of each server / lists the servers. |
+| `install [--force]` | Registers the `local.touchid-ssh-agent` LaunchAgent, so the agent starts with your session. |
+| `authorize [user@]host [-p P] [-F FILE] [--alias A] [-- SSH_ARGS]` | Installs both keys, checks the Touch ID login, offers the ssh config block, updates the inventory and its backup. |
+
+**Day to day**
+
+| Command | What it does |
+| --- | --- |
+| `status` | Secure Enclave, Touch ID (including password lockout), identity, agent, LaunchAgent, emergency key, backup folder and FileVault. |
+| `inventory` / `audit [NAME...]` | Lists the servers / checks both keys and the ssh config of each server. |
+| `deauthorize NAME... \| --all [-F FILE] [-p P] [-- SSH_ARGS]` | Removes this Mac's two keys from servers and drops them from the inventory. `--all` does every server, then offers to delete the Touch ID key. |
+| `config ALIAS --host H [--user U] [--port P]` | Prints the `ssh_config` block. |
 | `set backup-path DIR\|none` | Sets or clears the backup folder for `inventory.age`. |
+
+**New Mac and recovery**
+
+| Command | What it does |
+| --- | --- |
+| `migrate` | Shows, with this Mac's own data, how to move to a new Mac and what to fix first. Changes nothing. |
+| `recovery test KIT [--inventory FILE]` | Checks that the kit still opens every server. Changes nothing. |
+| `recover KIT [--inventory FILE] [--keep-emergency-key]` | On a new Mac, moves every inventory server to this Mac, then audits. `--keep-emergency-key` answers Keep without asking. |
 | `recovery create [--replace] [--own-passphrase]` | Creates a new emergency kit. |
 | `recovery import FILE.pub [--replace]` / `recovery pubkey` | Uses an existing emergency key / prints the emergency public key. |
-| `recover KIT [--inventory FILE] [--keep-emergency-key]` | On a new Mac, moves every inventory server to this Mac, then audits. `--keep-emergency-key` answers Keep without asking. |
-| `recovery test KIT [--inventory FILE]` | Checks that the kit still opens every server. Changes nothing. |
+
+**Advanced**
+
+| Command | What it does |
+| --- | --- |
 | `create [--comment T] [--biometry current-set\|any]` | Creates only the Touch ID key. Refuses if one already exists. |
 | `pubkey` / `fingerprint` | Prints the public key or its SHA256 fingerprint. |
-| `status` | Secure Enclave, Touch ID (including password lockout), identity, agent, LaunchAgent, emergency key, backup folder and FileVault. |
-| `config ALIAS --host H [--user U] [--port P]` | Prints the `ssh_config` block. |
 | `agent` | Runs the agent in the foreground (useful for debugging). |
-| `install [--force]` / `uninstall` | Registers or removes the `local.touchid-ssh-agent` LaunchAgent. |
-| `delete` | Deletes the identity irreversibly, after you type `DELETE`. |
+| `uninstall` | Removes the LaunchAgent. The keys are kept. |
+
+`deauthorize` reaches each server with your usual ssh access (one Touch ID when that goes through this agent; pass `-- -i OTHER_KEY` to use another key). It removes only the lines holding this Mac's Touch ID key and emergency key, matched exactly, and leaves every other line alone. If no other key would be left on the server, it stops and asks first, because afterwards only a password or your provider's console would get you in. The old `delete` command now points to `deauthorize --all`.
 
 By default everything lives in `~/.touchid-ssh-agent/`. Set `TOUCHID_SSH_AGENT_DIR` to use another directory. Touch ID must be approved within 60 s; to change that, set `TOUCHID_SSH_AGENT_PROMPT_TIMEOUT` (in seconds) in the agent's environment.
 
@@ -233,11 +256,11 @@ See [`SECURITY.md`](SECURITY.md) for the threat model and how to report a vulner
 
 ## Recovery
 
-The Touch ID key is tied to **this** Mac and, with the `current-set` policy, to the current fingerprints. It is gone if you change Macs, if the Mac fails, if the fingerprints change, or if you run `delete`. So:
+The Touch ID key is tied to **this** Mac and, with the `current-set` policy, to the current fingerprints. It is gone if you change Macs, if the Mac fails, or if the fingerprints change. So:
 
 1. Keep the **emergency kit** outside the Mac and make sure every server has the emergency key (`audit`). See [Emergency kit and inventory](#emergency-kit-and-inventory).
 2. Test the kit from another computer now and then. A kit nobody has tried is a hope, not a plan.
-3. To move to a new Mac: run `setup` on the new Mac, `authorize` every server from it, test the login in a second session, and only then remove the old Mac's line from `authorized_keys`.
+3. To move to a new Mac, run `touchid-ssh-agent migrate` on the old one. It shows where your backup is, warns about anything `recover` would miss, and lists the steps: check the kit with `recovery test`, run `recover` on the new Mac, then clean up the old one.
 
 ## Roadmap
 

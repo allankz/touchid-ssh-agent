@@ -308,6 +308,56 @@ test("install script appends each key once and reports through markers") {
     check(report == ["login": "added", "recovery": "present"], "parse ignores shell noise: \(report)")
 }
 
+test("deauthorize script removes only this Mac's keys and never empties authorized_keys unasked") {
+    let login = AuthorizedKey(label: "login", type: SSHKeyFormat.keyType,
+                              blob: SSHKeyFormat.publicKeyBlob(P256.Signing.PrivateKey().publicKey), comment: "me@mac")
+    let recovery = AuthorizedKey(label: "recovery", type: "ssh-ed25519", blob: Data((0..<51).map { UInt8($0) }), comment: "kit")
+    let other = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherKeyOtherKeyOtherKeyOtherKeyOther other@laptop"
+    let home = try makeTempDirectory()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let file = home.appendingPathComponent(".ssh/authorized_keys")
+    func runScript(allowEmpty: Bool) throws -> [String: String] {
+        let result = try run("/bin/sh", ["-s"], environment: ["HOME": home.path],
+                             stdin: Data(RemoteKeys.deauthorizeScript([login, recovery], allowEmpty: allowEmpty).utf8))
+        check(result.status == 0, "script ran: \(result.stderr)")
+        return RemoteKeys.parse(result.stdout)
+    }
+
+    check(try runScript(allowEmpty: false) == ["login": "absent", "recovery": "absent"], "no authorized_keys file")
+    try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try "# keys\n\(login.line)\n\(other)\n\(recovery.line)\n".write(to: file, atomically: true, encoding: .utf8)
+    chmod(file.path, 0o600)
+    check(try runScript(allowEmpty: false) == ["login": "found", "recovery": "found"], "both found")
+    let left = try String(contentsOf: file, encoding: .utf8)
+    check(left == "# keys\n\(other)\n", "only the other key and the comment are left: \(left)")
+    check(((try FileManager.default.attributesOfItem(atPath: file.path))[.posixPermissions] as? Int) == 0o600, "mode kept")
+
+    try "\(login.line)\n\n# only ours\n\(recovery.line)\n".write(to: file, atomically: true, encoding: .utf8)
+    check(try runScript(allowEmpty: false)["empty"] == "refused", "refuses to leave no key")
+    check(try String(contentsOf: file, encoding: .utf8).contains(login.base64), "nothing written when refused")
+    check(try runScript(allowEmpty: true) == ["login": "found", "recovery": "found"], "removes them when allowed")
+    check(try !String(contentsOf: file, encoding: .utf8).contains("ssh-"), "no key left")
+    check(try runScript(allowEmpty: false) == ["login": "absent", "recovery": "absent"], "a second run finds nothing")
+}
+
+test("host keys: [host]:port entries first, then the bare hostname, as ssh does") {
+    let directory = try makeTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    func key() -> String {
+        "\(SSHKeyFormat.keyType) \(SSHKeyFormat.publicKeyBlob(P256.Signing.PrivateKey().publicKey).base64EncodedString())"
+    }
+    let bare = key(), ported = key()
+    let file = directory.appendingPathComponent("known_hosts")
+    var resolved = ResolvedTarget(hostname: "203.0.113.5", user: "deploy", port: 2222)
+    resolved.userKnownHostsFiles = [file.path]
+    try "203.0.113.5 \(bare)\n".write(to: file, atomically: true, encoding: .utf8)
+    check(HostKeys.known(for: resolved) == [bare], "bare hostname entry used for another port")
+    try "203.0.113.5 \(bare)\n[203.0.113.5]:2222 \(ported)\n".write(to: file, atomically: true, encoding: .utf8)
+    check(HostKeys.known(for: resolved) == [ported], "the port's own entry wins")
+    resolved.hostKeyAlias = "web"
+    check(HostKeys.known(for: resolved).isEmpty, "a HostKeyAlias is looked up alone")
+}
+
 test("generated passphrases: 6 groups of 4 unambiguous characters") {
     var seen = Set<String>()
     for _ in 0..<200 {
@@ -1424,6 +1474,109 @@ if runDocker {
         """#, paths: replacer.paths, extra: ["AGE": agePath ?? "age", "NEWKIT": savedKit.path, "INV": recBackup.path,
                                              "PASS": passphrase], in: work)
         check(opened.stdout.contains(replacer.identity.fingerprint), "the new kit opens the new backup")
+    }
+
+    // deauthorize: a Mac takes its keys off the server again. These run last,
+    // because the second one leaves the server without any key.
+    let leaver = try LiveAgent.start()
+    defer { leaver.stop() }
+    let leaveKit = try plainKit(in: work, name: "leave-emergency")
+    let leaveCloud = work.appendingPathComponent("leave cloud")
+    let leaveConfig = work.appendingPathComponent("ssh_config_leave")
+    var leaveKeys: [AuthorizedKey] = []
+    func serverFile() throws -> String {
+        try run(docker, ["exec", recContainer ?? "", "cat", "/home/tester/.ssh/authorized_keys"]).stdout
+    }
+    func leaveInventory(configFile: String) throws {
+        var inventory = Inventory(mac: "touchid-ssh-agent@leaver")
+        inventory.upsert(InventoryEntry(alias: "rec-leave", destination: "rec", hostname: "127.0.0.1", user: "tester",
+                                        port: Int(recPort) ?? 0, sshConfigFile: configFile,
+                                        loginKeyFingerprint: leaver.identity.fingerprint,
+                                        recoveryKeyFingerprint: leaveKeys[1].fingerprint, authorizedAt: .wholeSecondsNow))
+        try InventoryStore.save(inventory, to: leaver.paths)
+        check(InventoryBackup.export(paths: leaver.paths).isWritten, "backup written")
+    }
+    func backupServers() throws -> Int? {
+        let decrypted = try run(agePath ?? "age", ["-d", "-i", leaveKit.kit.path, leaveCloud.appendingPathComponent(InventoryBackup.fileName).path])
+        return (try? Inventory.decode(Data(decrypted.stdout.utf8)))?.servers.count
+    }
+
+    test("deauthorize NAME: removes only this Mac's two keys, drops the server and updates the backup") {
+        let emergency = try RecoveryStore.importPublicKey(from: leaveKit.publicKey, into: leaver.paths, replace: false)
+        leaveKeys = [AuthorizedKey.login(leaver.identity), AuthorizedKey.recovery(emergency)]
+        try FileManager.default.createDirectory(at: leaveCloud, withIntermediateDirectories: false)
+        try SettingsStore.save(AgentSettings(backupPath: leaveCloud.path), to: leaver.paths)
+        _ = try RemoteKeys.install(leaveKeys, on: SSHTarget(destination: "rec", configFile: recConfig.path))
+        try leaveInventory(configFile: recConfig.path)
+        let before = try recServerBlobs()
+        check(leaveKeys.allSatisfy { before.contains($0.blob) }, "both keys on the server first")
+
+        let result = try expectScript(#"""
+        spawn $env(CLI) deauthorize rec-leave
+        expect {
+          "to take this Mac" { send -- "REMOVE\r"; exp_continue }
+          "remove the keys anyway" { puts "\nRESULT=asked-to-empty"; exit 4 }
+          timeout { puts "\nRESULT=hung"; exit 3 }
+          eof
+        }
+        catch wait result
+        puts "\nEXIT=[lindex $result 3]"
+        """#, paths: leaver.paths, in: work)
+        check(result.stdout.contains("EXIT=0"), "deauthorize succeeded: \(result.stdout.suffix(600))")
+        check(result.stdout.contains("removed the Touch ID key and the emergency key"), "reports both removed")
+        let after = try recServerBlobs()
+        check(!leaveKeys.contains { after.contains($0.blob) }, "both keys gone")
+        check(after.count == before.count - 2, "every other key kept: \(before.count) -> \(after.count)")
+        check(try InventoryStore.load(from: leaver.paths).servers.isEmpty, "server dropped from the inventory")
+        check(try backupServers() == 0, "the backup now lists no server")
+        check(try IdentityStore.load(from: leaver.paths) != nil, "the Touch ID key is kept")
+    }
+
+    test("deauthorize --all: refuses to leave a server without keys until told, then offers to delete the Touch ID key") {
+        // Only this Mac's keys left, reached through this Mac's agent.
+        let lines = leaveKeys.map(\.line).joined(separator: "\n")
+        _ = try onRecServer("printf '%s\\n' '\(lines)' > $HOME/.ssh/authorized_keys")
+        try """
+        Host rec
+          HostName 127.0.0.1
+          Port \(recPort)
+          User tester
+          IdentityAgent \(leaver.paths.socket.path)
+          IdentityFile \(leaver.paths.publicKeyFile.path)
+          IdentitiesOnly yes
+          StrictHostKeyChecking no
+          UserKnownHostsFile \(work.appendingPathComponent("known_hosts_rec").path)
+          LogLevel ERROR
+        """.write(to: leaveConfig, atomically: true, encoding: .utf8)
+        try leaveInventory(configFile: leaveConfig.path)
+        func runAll(_ answer: String) throws -> ShellResult {
+            try expectScript(#"""
+            spawn $env(CLI) deauthorize --all
+            expect {
+              "to take this Mac" { send -- "REMOVE\r"; exp_continue }
+              "remove the keys anyway" { send -- "$env(ANSWER)\r"; exp_continue }
+              "to delete the Touch ID key" { send -- "DELETE\r"; exp_continue }
+              timeout { puts "\nRESULT=hung"; exit 3 }
+              eof
+            }
+            catch wait result
+            puts "\nEXIT=[lindex $result 3]"
+            """#, paths: leaver.paths, extra: ["ANSWER": answer], in: work)
+        }
+
+        let skipped = try runAll("SKIP")
+        check(skipped.stdout.contains("No other key would be left") && skipped.stdout.contains("EXIT=1"),
+              "warned and skipped: \(skipped.stdout.suffix(600))")
+        check(try leaveKeys.allSatisfy { try serverFile().contains($0.base64) }, "nothing changed on the server")
+        check(try InventoryStore.load(from: leaver.paths).servers.count == 1, "server kept in the inventory")
+
+        let forced = try runAll("REMOVE")
+        check(forced.stdout.contains("EXIT=0"), "removed when told: \(forced.stdout.suffix(600))")
+        check(try !serverFile().contains("ssh-"), "no key left on the server")
+        check(try InventoryStore.load(from: leaver.paths).servers.isEmpty, "inventory empty")
+        check(try backupServers() == 0, "backup lists no server")
+        check(try IdentityStore.load(from: leaver.paths) == nil, "Touch ID key deleted after DELETE")
+        check(try RecoveryStore.load(from: leaver.paths) != nil, "emergency key still configured")
     }
 } else {
     print("(real Docker login skipped; use --docker)")

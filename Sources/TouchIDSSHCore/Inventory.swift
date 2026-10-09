@@ -140,7 +140,8 @@ public enum InventoryBackup {
     }
 
     @discardableResult
-    public static func export(paths: AgentPaths, settings: AgentSettings? = nil) -> Outcome {
+    /// `allowEmpty` is for `deauthorize`, which empties the inventory on purpose.
+    public static func export(paths: AgentPaths, settings: AgentSettings? = nil, allowEmpty: Bool = false) -> Outcome {
         let settings = settings ?? SettingsStore.load(from: paths)
         guard let folder = settings.backupDirectory else { return .noBackupFolder }
         guard FileManager.default.fileExists(atPath: paths.recoveryPublicKeyFile.path) else { return .noRecoveryKey }
@@ -154,7 +155,7 @@ public enum InventoryBackup {
             let target = folder.appendingPathComponent(fileName)
             // Never replace an existing backup with an empty list: on a new Mac
             // that backup is the only copy of the server list.
-            if inventory.servers.isEmpty, FileManager.default.fileExists(atPath: target.path) {
+            if inventory.servers.isEmpty, !allowEmpty, FileManager.default.fileExists(atPath: target.path) {
                 return .keptExisting(target)
             }
             let plaintext = try JSON.encode(inventory)
