@@ -50,6 +50,13 @@ public struct ResolvedTarget: Equatable {
     public var identitiesOnly = false
     public var userKnownHostsFiles: [String] = []
     public var hostKeyAlias: String? = nil
+    /// Every keyword `ssh -G` printed, with its first value.
+    public var options: [String: String] = [:]
+
+    /// The jump host or proxy command ssh would use, if any.
+    public var proxy: String? {
+        options["proxyjump"].map { "ProxyJump \($0)" } ?? options["proxycommand"].map { "ProxyCommand \($0)" }
+    }
 
     public init(hostname: String, user: String, port: Int) {
         self.hostname = hostname
@@ -78,16 +85,20 @@ public struct AuthorizedKey: Equatable {
     public let type: String
     public let blob: Data
     public let comment: String
+    /// authorized_keys options written before the key, such as the scoped
+    /// `cert-authority,principals="..."` of the temporary-access CA.
+    public let options: String?
 
-    public init(label: String, type: String, blob: Data, comment: String) {
+    public init(label: String, type: String, blob: Data, comment: String, options: String? = nil) {
         self.label = label
         self.type = type
         self.blob = blob
         self.comment = RemoteKeys.safeComment(comment)
+        self.options = options
     }
 
     public var base64: String { blob.base64EncodedString() }
-    public var line: String { "\(type) \(base64) \(comment)" }
+    public var line: String { (options.map { "\($0) " } ?? "") + "\(type) \(base64) \(comment)" }
     public var fingerprint: String { SSHKeyFormat.fingerprint(blob: blob) }
 
     public static func login(_ identity: StoredIdentity) -> AuthorizedKey {
@@ -160,6 +171,7 @@ public enum RemoteKeys {
         resolved.userKnownHostsFiles = (values["userknownhostsfile"] ?? "~/.ssh/known_hosts")
             .split(separator: " ").map(String.init)
         resolved.hostKeyAlias = values["hostkeyalias"]
+        resolved.options = values
         return resolved
     }
 

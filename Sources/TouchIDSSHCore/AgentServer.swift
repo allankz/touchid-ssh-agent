@@ -58,42 +58,7 @@ public final class AgentServer {
         try paths.ensureDirectory()
         let path = paths.socket.path
         try removeStaleSocket(at: path)
-
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { throw AgentServerError.system("socket", errno) }
-
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array(path.utf8)
-        guard pathBytes.count < MemoryLayout.size(ofValue: address.sun_path) else {
-            close(fd)
-            throw AgentServerError.socketPathTooLong(path)
-        }
-        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
-            buffer.copyBytes(from: pathBytes)
-            buffer[pathBytes.count] = 0
-        }
-        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-
-        // The socket is created 0600 (umask) inside a 0700 directory.
-        let previousMask = umask(0o177)
-        let bound = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        umask(previousMask)
-        guard bound == 0 else {
-            let code = errno
-            close(fd)
-            throw AgentServerError.system("bind", code)
-        }
-        chmod(path, 0o600)
-        guard listen(fd, 16) == 0 else {
-            let code = errno
-            close(fd)
-            throw AgentServerError.system("listen", code)
-        }
+        let fd = try UnixSocket.listen(at: path)
 
         listenSocket = fd
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: acceptQueue)
@@ -218,6 +183,53 @@ public final class AgentServer {
             log.record("identity-error", ["error": "\(error)"])
             return nil
         }
+    }
+}
+
+/// Listening Unix sockets shared by the login agent, the temporary-access
+/// agent and its control socket.
+enum UnixSocket {
+    /// Largest path a `sockaddr_un` holds on macOS, without the final NUL.
+    static var maxPathLength: Int { MemoryLayout.size(ofValue: sockaddr_un().sun_path) - 1 }
+
+    /// Creates, binds (mode 0600) and listens on `path`; returns the descriptor.
+    static func listen(at path: String, backlog: Int32 = 16) throws -> Int32 {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw AgentServerError.system("socket", errno) }
+
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(path.utf8)
+        guard pathBytes.count < MemoryLayout.size(ofValue: address.sun_path) else {
+            close(fd)
+            throw AgentServerError.socketPathTooLong(path)
+        }
+        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
+            buffer.copyBytes(from: pathBytes)
+            buffer[pathBytes.count] = 0
+        }
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+
+        // The socket is created 0600 (umask) inside a 0700 directory.
+        let previousMask = umask(0o177)
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        umask(previousMask)
+        guard bound == 0 else {
+            let code = errno
+            close(fd)
+            throw AgentServerError.system("bind", code)
+        }
+        chmod(path, 0o600)
+        guard Darwin.listen(fd, backlog) == 0 else {
+            let code = errno
+            close(fd)
+            throw AgentServerError.system("listen", code)
+        }
+        return fd
     }
 }
 
