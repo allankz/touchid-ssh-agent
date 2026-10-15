@@ -1,0 +1,56 @@
+# Instructions for AI agents: temporary SSH access
+
+> **Design contract, not implemented in version 0.1.0.** These commands describe Phase 2. Do not assume they exist in the current executable. Implementation must ship equivalent guidance in `touchid-ssh-agent instructions`, referenced by main help.
+
+## Discovery
+
+Read the dedicated **Temporary access** section of `touchid-ssh-agent help`, then `touchid-ssh-agent instructions` when available. `access help` / `access --help` explain enrollment, inventory, dated aliases and cleanup. Installed guidance describes the available version. No MCP service, agent-specific plugin or repository checkout is required.
+
+## Workflow
+
+1. Inspect `touchid-ssh-agent access status --json`. It never requests Touch ID.
+2. Reuse an active grant if its destinations, permissions and remaining time cover the authorized task.
+3. Otherwise request the smallest useful target set and duration:
+
+   ```bash
+   touchid-ssh-agent access app-server,worker-server --for 2h --json
+   ```
+
+   The user approves through native Touch ID. Wait for the command result; an attempted request is not approval.
+4. Success includes `expires_at`, `remaining_seconds`, permissions, aliases such as `app-server-access-20261015-a1b2c3d4e5f6` and per-target `ssh_argv`. Append the remote command as an argv element and execute without a local shell. Keep the returned `-F` config path; the alias is defined in that grant's file, not the user's main SSH config. Use the original inventory destination when requesting another grant.
+5. A nonzero exit and `error.code` mean failure. Never infer approval from a file, socket, previous grant or progress text.
+6. On denial or timeout, report the outcome without repeatedly opening Touch ID. On expiry, explain that another approval is needed; do not silently extend access.
+7. If an active grant does not cover the task, report the conflict. Do not stop someone else's work or broaden scope automatically.
+8. Stop a task-specific grant with `touchid-ssh-agent access stop --json` when appropriate. Do not stop a shared grant still needed by other work.
+9. Expiry/stop normally remove generated files. If status reports stale artifacts, `touchid-ssh-agent access cleanup --json` removes only owned stale files and preserves live, valid grants. Do not edit personal SSH config or remove CA trust as a substitute for cleanup.
+
+## Missing enrollment
+
+Each target needs one-time temporary-access enrollment through the proposed `authorize HOST --temporary-access` option. Missing enrollment or an unknown host returns an actionable error before Touch ID. Explain that prerequisite; requesting a grant must not silently modify server trust.
+
+The inventory records the target's CA trust, principal, fingerprint and audit result, plus a bounded latest-grant summary. This record helps find enrolled destinations; it does not by itself prove a grant is active. Use `access status --json` for live validity and current command paths.
+
+## Boundaries
+
+- Native Touch ID approves issuance. AI software never supplies or bypasses approval.
+- Do not switch to the login key, emergency key, another agent or connection sharing to bypass denial or expiry.
+- Expiry/stop prevent further local signing; certificate expiry also rejects new authentication. Existing SSH connections and remote processes may continue.
+- Selected account permissions apply. A grant is not a sandbox and does not roll back changes.
+- This feature does not approve Git commit signatures, `sudo` or unrelated prompts.
+
+## Copyable discovery block
+
+Once Phase 2 ships, users can place this in `AGENTS.md`, `CLAUDE.md` or equivalent instructions:
+
+```markdown
+For temporary SSH access, run `touchid-ssh-agent instructions` and follow the
+installed workflow. Check `access status --json` first. When needed, request
+`access HOST[,HOST...] --for DURATION --json`; the user approves with Touch ID.
+Use the returned per-target `ssh_argv`, including its `-F` config and dated alias.
+Do not bypass denial or expiry, retry
+prompts in a loop, or stop/replace an unrelated active grant.
+```
+
+## Acceptance
+
+An agent given only the discovery block and executable must discover the dedicated help section, request a two-target grant, use returned `-F` argv and dated aliases for repeated SSH commands, and handle missing enrollment, denial, expiry and stale cleanup without guessing paths, editing personal config or falling back to the main identity. Validate JSON stdout separately from human progress on stderr.

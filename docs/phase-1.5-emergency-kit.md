@@ -81,6 +81,12 @@ Read-only. It shows this Mac's keys, backup folder and servers, warns about what
 
 The same first steps without changing anything: it opens the inventory, loads the kit and logs in to every server with the emergency key only. Unknown host keys go to a scratch file, so not even `known_hosts` changes.
 
+### Planned Phase 2 recovery integration
+
+The implemented flow above covers login and emergency keys. When temporary SSH access ships, `recover` must also replace CA trust on targets enrolled in the inventory: add the new Mac's CA with the recorded scope, verify certificate authentication, then remove the old CA by its recorded public key/fingerprint and audit its absence. Do not skip unfinished CA migration just because the login and emergency keys already match the new Mac.
+
+Keep the old/new CA identities and per-target progress until removal is verified, report unreachable or failed targets as pending, and preserve the existing recovery/backup safeguards. `--keep-emergency-key` does not preserve the lost Mac's CA. Temporary grants and aliases are not restored. `recovery test` stays read-only and reports recorded CA trust; manual kit instructions must explain removing the old CA using the decrypted inventory. The exact future sequence and acceptance cases are in the [Phase 2 recovery design](phase-2-temporary-credentials.md#required-recovery-sequence-for-ca-trust).
+
 ## Decisions
 
 | Decision | Choice | Reason |

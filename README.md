@@ -31,7 +31,7 @@ touchid-ssh-agent keeps the convenience of SSH keys and gets rid of the file:
 
 Here is what is on the way. Star or watch the repository to follow along, and share your ideas in [Discussions](https://github.com/allankz/touchid-ssh-agent/discussions/categories/ideas).
 
-- **Temporary access for AI agents.** One Touch ID before you step away issues a short-lived, tightly scoped SSH certificate, so an agent can keep working overnight or while you are away from the Mac. The server rejects it once it expires, and your main key keeps asking for Touch ID. ([design](docs/phase-2-temporary-credentials.md))
+- **Temporary SSH access for AI agents.** Approve selected hosts for a limited time with one Touch ID, then let an agent make repeated SSH connections during the day or overnight. The planned `access HOST[,HOST...] --for 2h` command needs no profile; built-in instructions and JSON results tell agents how to request and use it. Expiry prevents new authentications; existing connections may continue. The main key keeps asking for Touch ID. ([design](docs/phase-2-temporary-credentials.md), [AI workflow](docs/ai-agents.md))
 
 ## How it works
 
@@ -265,8 +265,10 @@ The Touch ID key is tied to **this** Mac and, with the `current-set` policy, to 
 ## Roadmap
 
 - **Phase 1.5: emergency kit and inventory.** Done; design notes in [`docs/phase-1.5-emergency-kit.md`](docs/phase-1.5-emergency-kit.md).
-- **Automated recovery.** Done: `recover` and `recovery test`.
-- **Phase 2: temporary credentials for agents (overnight use).** One Touch ID before bed issues an SSH certificate valid for a few hours, with a restricted scope, signed by a CA kept in the Secure Enclave. The login key keeps asking for Touch ID on every use. Design in [`docs/phase-2-temporary-credentials.md`](docs/phase-2-temporary-credentials.md). Not implemented yet.
+- **Automated recovery.** Done for login and emergency keys: `recover` and `recovery test`. Phase 2 also requires verified replacement of CA trust and removal of the old Mac's CA on each enrolled server.
+- **Phase 2: temporary SSH access.** Direct host selection (`access HOST[,HOST...] --for DURATION`), one Touch ID to issue a scoped certificate, CA trust recorded in inventory, and dated aliases in separate generated SSH configs with automatic/manual cleanup. A dedicated help section, built-in instructions and JSON output guide AI agents. The CA stays in the Secure Enclave; the login key keeps asking for Touch ID on every use. Design in [`docs/phase-2-temporary-credentials.md`](docs/phase-2-temporary-credentials.md), with the [AI workflow](docs/ai-agents.md). Not implemented yet.
+
+The complete implementation handoff is [`PROMPT-PHASE-2.md`](PROMPT-PHASE-2.md), with source-file pointers, requirements and acceptance checks. The [validation report](docs/phase-2-validation.md) separates measured protocol feasibility from work still required for the production feature.
 
 ## Development
 
