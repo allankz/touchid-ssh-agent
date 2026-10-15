@@ -13,6 +13,8 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("LocalAuthentication"),
                 .linkedFramework("Security"),
+                // Idle-sleep assertion and wake notifications for temporary access.
+                .linkedFramework("IOKit"),
             ]
         ),
         .executableTarget(

@@ -946,6 +946,9 @@ test("log has no key, user or payload") {
     check(!log.contains("secret-in-payload"), "no payload")
 }
 
+runAccessUnitTests()
+runAccessSecureEnclaveTests()
+
 // MARK: - Docker end-to-end
 
 if runDocker {
