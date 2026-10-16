@@ -8,7 +8,8 @@ let accessHelp = """
 Request
   access HOST[,HOST...] --for DURATION [--force-command COMMAND] [--allow-pty] [--json]
       HOST is an inventory name, an ssh alias or user@host of a server enrolled for
-      temporary access; separate several with commas. Every host is checked before
+      temporary access; separate several with commas. For a server on a nonstandard
+      port, use its inventory name or ssh alias. Every host is checked before
       Touch ID: one unknown or unenrolled host fails the whole request. DURATION is
       30m, 2h, 1h30m and so on, at most 12h. One Touch ID approves one certificate for
       all hosts; ssh logins through the returned commands then need no Touch ID until
