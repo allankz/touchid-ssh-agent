@@ -114,6 +114,17 @@ public final class AccessJob {
         let request: AccessRequest
         do {
             request = try loadRequest()
+        } catch {
+            // Not this job's directory (another request, or one a live job
+            // serves): leave every file alone. The CLI cleans up its own.
+            log.record("job-refused", ["grant": directory.grantId, "error": (error as? AccessError)?.code ?? "setup"])
+            return 1
+        }
+        if let other = GrantManifest.read(from: directory)?.process, other.isRunning {
+            log.record("job-refused", ["grant": directory.grantId, "error": "already-running"])
+            return 1
+        }
+        do {
             try recordProcessIdentity()
             try startControl()
         } catch {

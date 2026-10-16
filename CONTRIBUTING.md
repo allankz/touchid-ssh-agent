@@ -40,7 +40,7 @@ make test-touchid   # interactive: approve, deny and time out real Touch ID prom
 - XCTest does not ship with the Command Line Tools, so the suite is a plain executable in `Tests/SelfTest/` that uses OpenSSH (`ssh-keygen`, `ssh-add`, `ssh`) and `age` as oracles.
 - Keep the Mac **unlocked** while tests run: the Secure Enclave refuses operations while the screen is locked.
 - Tests create Secure Enclave keys and CAs **without** Touch ID through the `@_spi(Testing)` API, and only in temporary directories. Never point tests at `~/.touchid-ssh-agent`.
-- Temporary-access tests use short directories under `/tmp`, because grant sockets must fit the 104-byte Unix socket limit. Their grant jobs run as detached processes (`TOUCHID_SSH_AGENT_ACCESS_LAUNCH=process`), except one test that runs a real per-grant launchd job. `swift run touchid-ssh-agent-selftest --docker --access-only` runs only the temporary-access and CA recovery Docker tests.
+- Temporary-access tests use short directories under `/tmp`, because grant sockets must fit the 104-byte Unix socket limit. Their grant jobs run as detached processes (`TOUCHID_SSH_AGENT_ACCESS_LAUNCH=process`), except one test that runs a real per-grant launchd job. `swift run touchid-ssh-agent-selftest --docker --access-only` runs only the temporary-access and CA recovery Docker tests. The recovery tests interrupt a real `recover` run with `TOUCHID_SSH_AGENT_TEST_INTERRUPT=after-removal:<alias>` and resume it.
 - Run `make test-touchid` whenever you touch signing, the Touch ID prompt, the agent server, the CA, the grant job or the LaunchAgent. Its second part (with Docker) approves, denies and times out real CA issuance under launchd. No automated test can press the sensor.
 
 ## Project layout

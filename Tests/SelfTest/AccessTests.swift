@@ -786,12 +786,43 @@ func runAccessSecureEnclaveTests() {
         check(pendingRun.wait() == 1, "job ends when its caller goes away")
         check(!FileManager.default.fileExists(atPath: pending.directory.url.path), "nothing published")
 
-        // A bad digest (the request changed after the summary) is refused.
+        // A bad digest (the request changed after the summary) is refused, and
+        // the job leaves the directory to the CLI that created it.
         let tampered = try fixture.prepare()
         let tamperedRun = fixture.start(AccessJob(paths: fixture.paths, grantDirectory: tampered.directory.url,
                                                   digest: String(repeating: "0", count: 64), options: fixture.options()))
         check(tamperedRun.wait() == 1, "digest mismatch refused")
-        check(!FileManager.default.fileExists(atPath: tampered.directory.url.path), "and cleaned")
+        check(!FileManager.default.fileExists(atPath: tampered.directory.controlSocket.path), "nothing published")
+        check(GrantManifest.read(from: tampered.directory)?.process == nil, "the manifest was not claimed")
+        try GrantStore.remove(GrantStore.inspect(name: tampered.directory.grantId, paths: fixture.paths), paths: fixture.paths)
+    }
+
+    test("grant job: a second job on a live grant's directory leaves that grant alone") {
+        let fixture = try JobFixture.make()
+        defer { fixture.remove() }
+        let live = try fixture.prepare()
+        let liveRun = fixture.start(AccessJob(paths: fixture.paths, grantDirectory: live.directory.url, digest: live.digest,
+                                              options: fixture.options()))
+        let owner = ControlConnection.connect(live.directory.controlSocket.path, timeout: 5)
+        _ = owner?.request(["op": "attach"], timeout: 5)
+        while let message = owner?.receive(timeout: 10), message["event"] as? String != "issued" {}
+        owner?.send(["op": "confirm"])
+        check(owner?.receive(timeout: 5)?["event"] as? String == "active", "live grant active")
+        owner?.close()
+        let before = Set((try? FileManager.default.contentsOfDirectory(atPath: live.directory.url.path)) ?? [])
+        let identity = GrantManifest.read(from: live.directory)?.process
+
+        for digest in [live.digest, String(repeating: "f", count: 64)] {
+            let second = fixture.start(AccessJob(paths: fixture.paths, grantDirectory: live.directory.url, digest: digest,
+                                                 options: fixture.options()))
+            check(second.wait() == 1, "second job refused")
+        }
+        let after = Set((try? FileManager.default.contentsOfDirectory(atPath: live.directory.url.path)) ?? [])
+        check(after == before, "every file of the live grant is still there: \(before.subtracting(after))")
+        check(GrantManifest.read(from: live.directory)?.process == identity, "the manifest still names the live job")
+        check(AccessControl.request(live.directory, ["op": "status"])?["state"] as? String == "active", "still serving")
+        _ = AccessControl.request(live.directory, ["op": "stop"])
+        check(liveRun.wait() == 0, "the live job stops normally")
     }
 
     test("grant job: issues after approval, publishes only then, ends on abort, stop and expiry") {

@@ -103,8 +103,9 @@ public struct TemporaryAccessEnrollment: Codable, Equatable {
     /// CA replacement in progress (recovery on a new Mac, or a new CA). Kept
     /// until the old CA's removal is verified on this server.
     public var caRotation: CARotation?
-    /// The CA this entry trusted before its last completed rotation.
-    public var retiredCAFingerprint: String?
+    /// CAs this server trusted before and that were removed from it (a lost
+    /// Mac's CA after recovery, or this Mac's previous CA).
+    public var retiredCAFingerprints: [String]?
 
     public init(targetId: String, principal: String, caPublicKey: String, caFingerprint: String,
                 authorizedKeyOptions: String, enrolledAt: Date, verified: Bool) {
@@ -118,9 +119,36 @@ public struct TemporaryAccessEnrollment: Codable, Equatable {
     }
 
     /// The CA key blob, but only when it matches the recorded fingerprint.
-    public var caBlob: Data? {
-        guard let blob = SSHKeyFormat.blob(fromPublicKeyLine: caPublicKey),
-              SSHKeyFormat.fingerprint(blob: blob) == caFingerprint else { return nil }
+    public var caBlob: Data? { CAKey(publicKey: caPublicKey, fingerprint: caFingerprint).blob }
+
+    /// Every CA this record says the server may trust: the enrolled one and,
+    /// while a replacement is pending, its old and new CAs.
+    public var recordedCAs: [CAKey] {
+        var keys = [CAKey(publicKey: caPublicKey, fingerprint: caFingerprint)]
+        if let rotation = caRotation {
+            keys += rotation.oldCAs
+            keys.append(CAKey(publicKey: rotation.newCAPublicKey, fingerprint: rotation.newCAFingerprint))
+        }
+        var seen = Set<String>()
+        return keys.filter { seen.insert($0.fingerprint).inserted }
+    }
+}
+
+/// A CA public key line and its fingerprint, as recorded in the inventory.
+public struct CAKey: Codable, Equatable {
+    public var publicKey: String
+    public var fingerprint: String
+
+    public init(publicKey: String, fingerprint: String) {
+        self.publicKey = publicKey
+        self.fingerprint = fingerprint
+    }
+
+    /// The key blob, only when it matches the recorded fingerprint, so a
+    /// damaged record never leads to removing some other key.
+    public var blob: Data? {
+        guard let blob = SSHKeyFormat.blob(fromPublicKeyLine: publicKey),
+              SSHKeyFormat.fingerprint(blob: blob) == fingerprint else { return nil }
         return blob
     }
 }
@@ -176,6 +204,9 @@ public struct CARotation: Codable, Equatable {
     public var authorizedKeyOptions: String
     public var step: Step
     public var updatedAt: Date
+    /// More old CAs to remove, when the lost Mac itself left a replacement
+    /// unfinished (its previous CA and its own).
+    public var extraOldCAs: [CAKey]?
 
     public init(recoveryId: String, oldCAPublicKey: String, oldCAFingerprint: String, newCAPublicKey: String,
                 newCAFingerprint: String, principal: String, authorizedKeyOptions: String, step: Step, updatedAt: Date) {
@@ -192,10 +223,11 @@ public struct CARotation: Codable, Equatable {
 
     /// The old CA key blob, only when it matches its recorded fingerprint, so a
     /// damaged record never leads to removing some other key.
-    public var oldCABlob: Data? {
-        guard let blob = SSHKeyFormat.blob(fromPublicKeyLine: oldCAPublicKey),
-              SSHKeyFormat.fingerprint(blob: blob) == oldCAFingerprint else { return nil }
-        return blob
+    public var oldCABlob: Data? { CAKey(publicKey: oldCAPublicKey, fingerprint: oldCAFingerprint).blob }
+
+    /// Every old CA this replacement removes.
+    public var oldCAs: [CAKey] {
+        [CAKey(publicKey: oldCAPublicKey, fingerprint: oldCAFingerprint)] + (extraOldCAs ?? [])
     }
 }
 

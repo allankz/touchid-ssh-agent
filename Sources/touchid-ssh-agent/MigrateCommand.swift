@@ -126,8 +126,7 @@ func migrate(paths: AgentPaths) throws {
 
     Out.section("Back on this Mac, afterwards")
     Out.say("""
-      recover took this Mac's key\(enrolled.isEmpty ? "" : " and CA") off the servers, so it no longer logs in. To clean up:
-             \(tool) access stop
+      recover took this Mac's key\(enrolled.isEmpty ? "" : " and CA") off the servers, so it no longer logs in. To clean up:\(ca == nil && enrolled.isEmpty ? "" : "\n             \(tool) access stop")
              \(tool) uninstall
              rm -rf \(Terminal.shellQuoted(paths.displayPath(paths.directory)))
       and remove the Host blocks from ~/.ssh/config if you will not ssh from this Mac.
