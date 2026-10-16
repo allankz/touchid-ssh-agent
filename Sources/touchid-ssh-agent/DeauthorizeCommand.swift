@@ -41,7 +41,10 @@ func deauthorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
 
     let identity = try IdentityStore.load(from: paths)
     let emergency = try RecoveryStore.load(from: paths)
+    let ca = try CertificateAuthorityStore.load(from: paths)
+    // The CA is matched by its key alone: every line holding it goes, whatever its options.
     let keys = (identity.map { [AuthorizedKey.login($0)] } ?? []) + (emergency.map { [AuthorizedKey.recovery($0)] } ?? [])
+        + (ca.map { [AuthorizedKey(label: CATrust.label, type: SSHKeyFormat.keyType, blob: $0.publicKeyBlob, comment: $0.comment)] } ?? [])
     guard !keys.isEmpty else {
         throw UsageError(description: "this Mac has no Touch ID key and no emergency key, so there is nothing to remove.")
     }
@@ -70,6 +73,7 @@ func deauthorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
     Out.say("This removes these keys from each server's authorized_keys, matched exactly:")
     if let identity { Out.say("  Touch ID key    \(identity.fingerprint)") }
     if let emergency { Out.say("  Emergency key   \(emergency.fingerprint)") }
+    if let ca { Out.say("  Temporary CA    \(ca.fingerprint) (lines trusting it for temporary access)") }
     Out.say("""
 
     Other keys on the server are not touched, and the server leaves the inventory.
@@ -94,7 +98,7 @@ func deauthorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
     var failed: [String] = []
     for item in targets {
         Out.say("\n\(item.label)")
-        if let text = removeKeys(keys, from: item) {
+        if let text = removeKeys(keys + pendingOldCA(item.entry), from: item) {
             Out.say("  ✓ \(text)")
             if let entry = item.entry { removed.append(entry) }
         } else {
@@ -103,8 +107,10 @@ func deauthorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
     }
 
     if !removed.isEmpty {
-        inventory.servers.removeAll { entry in removed.contains { $0.alias == entry.alias } }
-        try InventoryStore.save(inventory, to: paths)
+        inventory = try InventoryStore.update(paths) { current -> Inventory in
+            current.servers.removeAll { entry in removed.contains { $0.alias == entry.alias } }
+            return current
+        }
         Out.say("")
         Out.say("Inventory: \(removed.count) server\(removed.count == 1 ? "" : "s") removed, \(inventory.servers.count) left.")
         reportBackup(InventoryBackup.export(paths: paths, allowEmpty: inventory.servers.isEmpty), paths: paths)
@@ -136,6 +142,16 @@ func deauthorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
         \(failed.count) server\(failed.count == 1 ? " was" : "s were") left as \(failed.count == 1 ? "it was" : "they were"): \(failed.joined(separator: ", ")).
         """)
         exit(1)
+    }
+}
+
+/// A lost Mac's CA still waiting for removal on this server (an unfinished
+/// recovery): it goes too, matched by its recorded key.
+private func pendingOldCA(_ entry: InventoryEntry?) -> [AuthorizedKey] {
+    guard let rotation = entry?.temporaryAccess?.caRotation else { return [] }
+    return rotation.oldCAs.compactMap(\.blob).enumerated().map { index, blob in
+        AuthorizedKey(label: index == 0 ? "old-ca" : "old-ca-\(index + 1)",
+                      type: SSHKeyFormat.keyTypeName(ofBlob: blob) ?? SSHKeyFormat.keyType, blob: blob, comment: "old-ca")
     }
 }
 
@@ -176,10 +192,19 @@ private func removeKeys(_ keys: [AuthorizedKey], from item: DeauthorizeTarget) -
         Out.say("  ✗ the server did not confirm the change; check its ~/.ssh/authorized_keys")
         return nil
     }
-    let names = ["login": "the Touch ID key", "recovery": "the emergency key"]
-    let found = keys.filter { outcome.report[$0.label] == "found" }.compactMap { names[$0.label] }
+    let names = ["login": "the Touch ID key", "recovery": "the emergency key", CATrust.label: "the CA trust"]
+    let found = keys.filter { outcome.report[$0.label] == "found" }
+        .compactMap { names[$0.label] ?? ($0.label.hasPrefix("old-ca") ? "a previous CA's trust" : nil) }
     let others = left.isEmpty ? "no other key left" : "\(left.count) other key\(left.count == 1 ? "" : "s") left"
+    let caNote = keys.contains { $0.label == CATrust.label } && outcome.report[CATrust.label] == "found"
+        ? " Trust configured elsewhere (for example TrustedUserCAKeys in sshd_config) is not checked." : ""
     return found.isEmpty
-        ? "neither key was there; \(others)"
-        : "removed \(found.joined(separator: " and ")); \(others)"
+        ? "none of this Mac's keys was there; \(others)"
+        : "removed \(listed(found)); \(others).\(caNote)"
+}
+
+/// "a", "a and b", "a, b and c".
+func listed(_ items: [String]) -> String {
+    guard items.count > 1 else { return items.first ?? "" }
+    return items.dropLast().joined(separator: ", ") + " and " + items[items.count - 1]
 }

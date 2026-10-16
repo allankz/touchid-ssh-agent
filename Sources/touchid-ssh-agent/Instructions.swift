@@ -1,0 +1,242 @@
+import Foundation
+import TouchIDSSHCore
+
+/// `access help` / `access --help`.
+let accessHelp = """
+\(tool) access: temporary SSH access approved with one Touch ID
+
+Request
+  access HOST[,HOST...] --for DURATION [--force-command COMMAND] [--allow-pty] [--json]
+      HOST is an inventory name, an ssh alias or user@host of a server enrolled for
+      temporary access; separate several with commas. For a server on a nonstandard
+      port, use its inventory name or ssh alias. Every host is checked before
+      Touch ID: one unknown or unenrolled host fails the whole request. DURATION is
+      30m, 2h, 1h30m and so on, at most 12h. One Touch ID approves one certificate for
+      all hosts; ssh logins through the returned commands then need no Touch ID until
+      the grant ends. One grant is active at a time.
+      The selected accounts may run any command, unless --force-command limits every
+      login to one command. No PTY unless --allow-pty. Agent, port and X11 forwarding
+      and user rc files are always denied.
+  access status [--json]   The active grant, its expiry and the exact ssh commands.
+                           Never asks for Touch ID and changes nothing.
+  access stop [--json]     Ends the grant now and removes its local files.
+  access cleanup [--json]  Removes files left by grants that ended abnormally (crash,
+                           logout, reboot). Keeps a live grant.
+
+One-time enrollment, per server
+  authorize HOST --temporary-access
+      With the access you already have, adds this Mac's CA to the account's
+      ~/.ssh/authorized_keys as a single line that accepts only that account's own
+      principal (principals="access-<id>") and denies forwarding and user rc. It checks
+      a certificate login and records the CA trust in the inventory and its encrypted
+      backup. The CA lives in the Secure Enclave and needs Touch ID for every
+      certificate. `access` never changes a server by itself.
+
+Using a grant
+  Each host gets a dated alias, such as web-access-20261015-a1b2c3d4e5f6, defined in the
+  grant's own ssh_config:
+      ~/.touchid-ssh-agent/access/grants/<grant-id>/ssh_config
+  Your ~/.ssh/config is not changed. Use the exact command that access prints (or the
+  ssh_argv in --json output), adding the remote command at the end:
+      ssh -F ~/.touchid-ssh-agent/access/grants/<grant-id>/ssh_config web-access-... uptime
+  That config offers only the grant's key and certificate, checks the host keys recorded
+  in the inventory, and disables forwarding and connection sharing.
+
+When a grant ends
+  At expiry, or after access stop, the grant job stops signing and removes its socket,
+  key, certificate and ssh_config; old commands then fail ("Can't open user config
+  file") instead of falling back to other keys. Servers also reject the certificate after
+  its expiry by themselves. Expiry and stop only block new logins: sessions and
+  commands already running continue, and changes made on the servers stay.
+  A crash, logout or reboot ends the grant as well; nothing restarts it. Its leftover
+  files go with the next request or access cleanup. Cleanup never touches CA trust or
+  the inventory; `deauthorize` removes CA trust from a server.
+
+Inventory
+  `inventory`, `status` and `audit` show which servers trust the CA, its fingerprint, the
+  last audit and the latest grant. A recorded grant is history, not proof that one is
+  active: use access status.
+
+Limits
+  Any process of your macOS user can use an active grant, like any SSH key it can read.
+  The temporary key is a software key held in the grant job's memory. Jump hosts and
+  proxy commands are not supported for temporary access yet.
+
+AI agents
+  instructions                 The workflow, written for the agent (Markdown).
+  instructions --snippet       A short block for CLAUDE.md, AGENTS.md or similar files.
+  instructions --add-to FILE   Adds that block to FILE, or updates it, after asking.
+                               For example ~/.claude/CLAUDE.md (Claude Code) or
+                               ~/.codex/AGENTS.md (Codex).
+"""
+
+/// `instructions`: the workflow for AI agents, in Markdown.
+let aiInstructions = """
+# touchid-ssh-agent: temporary SSH access for AI agents
+
+These instructions ship with touchid-ssh-agent \(version) and describe this version.
+
+## Workflow
+
+1. Check for a grant first; this never asks for Touch ID:
+   `touchid-ssh-agent access status --json`
+   If `status` is `active` and its `targets`, `permissions` and `remaining_seconds`
+   cover your task, use it.
+2. Otherwise request the smallest useful set of hosts and the shortest useful duration:
+   `touchid-ssh-agent access app-server,worker-server --for 2h --json`
+   The user approves with Touch ID on the Mac; you cannot approve it. Wait for the
+   command to exit. It prints exactly one JSON document on stdout; progress goes to stderr.
+3. On success (`"ok": true`, `"status": "active"`), run commands with each target's
+   `ssh_argv`, appending the remote command as more argv elements, without a local shell:
+   `["ssh", "-F", "/…/access/grants/<grant-id>/ssh_config", "app-server-access-20261015-a1b2c3d4e5f6", "uptime"]`
+   Keep the `-F` path and the dated alias exactly as returned. Do not use the main ssh
+   config, SSH_AUTH_SOCK, other keys or connection sharing.
+4. A nonzero exit with `"ok": false` is a failure. Read `error.code`:
+   - `unknown_target`, `not_enrolled`: the host needs a one-time
+     `touchid-ssh-agent authorize HOST --temporary-access` by the user. Do not change
+     server trust yourself.
+   - `approval_denied`, `approval_timeout`, `approval_unavailable`, `cancelled`: report
+     it. Do not request again in a loop; ask the user first.
+   - `access_already_active`: `active_grant` describes the current grant. Use it if it
+     covers the task; otherwise tell the user. Do not stop a grant other work may need.
+   - `access_busy`: another request is waiting for approval. Wait, then check status.
+   - `invalid_arguments`, `invalid_duration`, `ambiguous_target`, `readiness_failed`,
+     `unsupported_configuration`, `host_key_missing`, `ca_mismatch`, `rotation_pending`,
+     `ca_unusable`, `socket_path_too_long` and any other code: explain the message to
+     the user and stop.
+5. When a grant was only for your task, end it: `touchid-ssh-agent access stop --json`.
+6. When a grant expires, logins fail. Report it; never extend access silently.
+7. If status lists `stale_grants`, `touchid-ssh-agent access cleanup --json` removes only
+   leftover generated files of ended grants.
+
+## Boundaries
+
+- Only the user approves, with Touch ID. Never try to bypass, script or work around it.
+- After a denial or expiry, do not fall back to the main login key, the emergency key,
+  another agent or an existing connection.
+- Expiry and stop block new logins; sessions already open keep running. A grant is not
+  a sandbox: the selected accounts' permissions apply and changes are not undone.
+- Grants do not cover git commit signing, sudo or any other prompt.
+- `inventory` shows enrolled servers and the latest grant; that record is history.
+  Only `access status` says whether a grant is active.
+
+## JSON fields
+
+- Every document: `schema_version`, `ok`, `status` (`active`, `inactive`, `pending`,
+  `stopped`, `cleaned` or `error`). Errors add `error.code` and `error.message`.
+- Active grants: `grant_id`, `issued_at` and `expires_at` (UTC), `expires_at_local`,
+  `remaining_seconds`, `serial`, `permissions` (`force_command`, `pty`, `forwarding`),
+  `ssh_config_path`, and `targets[]` with `requested`, `inventory_alias`, `hostname`,
+  `user`, `port`, `ssh_alias` and `ssh_argv`.
+- Status also lists `stale_grants[]`; cleanup lists `removed[]` and `skipped[]`, each with
+  `grant_id` (and a `reason` when skipped).
+"""
+
+/// The short block a user puts in their agent's instructions file
+/// (CLAUDE.md, AGENTS.md...) so the agent discovers temporary access. Kept
+/// identical to the block in docs/ai-agents.md (the tests compare them).
+let aiSnippet = """
+## SSH access to servers (touchid-ssh-agent)
+
+To run commands on a server over SSH, use temporary access from touchid-ssh-agent.
+Run `touchid-ssh-agent instructions` once and follow that workflow: check
+`touchid-ssh-agent access status --json` first; when needed, request
+`touchid-ssh-agent access HOST[,HOST...] --for DURATION --json` with the fewest
+servers and the shortest time that fit the task, and wait while the user approves
+with Touch ID. Then use exactly the returned per-target `ssh_argv`, with its `-F`
+config and dated alias. Never bypass a denial or expiry, retry the prompt in a
+loop, fall back to other keys, or stop a grant you did not request.
+"""
+
+/// `instructions [--snippet | --add-to FILE]`.
+func instructions(_ arguments: ArraySlice<String>) throws {
+    let usage = "usage: \(tool) instructions [--snippet | --add-to FILE]"
+    switch Array(arguments) {
+    case []:
+        print(aiInstructions)
+    case ["--snippet"]:
+        print(aiSnippet)
+    case let args where args.count == 2 && args[0] == "--add-to":
+        try addAgentInstructions(to: args[1])
+    default:
+        throw UsageError(description: usage)
+    }
+}
+
+/// The block between markers in an agent's instructions file, so a later run
+/// updates it in place instead of adding a second copy.
+enum AgentInstructionsFile {
+    static let begin = "<!-- touchid-ssh-agent: begin (managed by `touchid-ssh-agent instructions --add-to`) -->"
+    static let end = "<!-- touchid-ssh-agent: end -->"
+    static let beginPrefix = "<!-- touchid-ssh-agent: begin"
+
+    static var block: String { begin + "\n" + aiSnippet + "\n" + end + "\n" }
+
+    /// The new file contents, or nil when a begin marker has no end marker.
+    static func updated(_ existing: String) -> (text: String, replacing: Bool)? {
+        let lines = existing.components(separatedBy: "\n")
+        if let start = lines.firstIndex(where: { $0.hasPrefix(beginPrefix) }) {
+            guard let stop = lines[start...].firstIndex(where: { $0 == end }) else { return nil }
+            let before = lines[..<start].joined(separator: "\n")
+            let after = lines[(stop + 1)...].joined(separator: "\n")
+            let head = before.isEmpty ? "" : before + "\n"
+            // Everything around the block is kept byte for byte.
+            return (head + block + after, true)
+        }
+        var text = existing
+        if !text.isEmpty, !text.hasSuffix("\n") { text += "\n" }
+        if !text.isEmpty { text += "\n" }
+        return (text + block, false)
+    }
+}
+
+/// Shows the block and, once the user confirms, adds it to `path` (or updates
+/// the copy an earlier run added). Symlinks are followed, so a linked file
+/// stays a link.
+func addAgentInstructions(to path: String) throws {
+    let file = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL.resolvingSymlinksInPath()
+    let shown = AgentPaths.fromEnvironment().displayPath(file)
+    guard Terminal.isInteractive else {
+        throw UsageError(description: """
+        `\(tool) instructions --add-to` changes \(shown) only after you confirm in a terminal.
+        To add the block yourself, run `\(tool) instructions --snippet` and paste it there.
+        """)
+    }
+    var isDirectory: ObjCBool = false
+    let exists = FileManager.default.fileExists(atPath: file.path, isDirectory: &isDirectory)
+    guard !isDirectory.boolValue else { throw UsageError(description: "\(shown) is a folder; name the file, for example \(shown)/CLAUDE.md") }
+    var existing = ""
+    if exists {
+        guard let data = FileManager.default.contents(atPath: file.path), let text = String(data: data, encoding: .utf8) else {
+            throw UsageError(description: "cannot read \(shown) as text; nothing was changed.")
+        }
+        existing = text
+    }
+    guard let (text, replacing) = AgentInstructionsFile.updated(existing) else {
+        throw UsageError(description: """
+        \(shown) has a touchid-ssh-agent begin marker without its end marker. Fix or remove that block by hand;
+        nothing was changed.
+        """)
+    }
+    guard text != existing else {
+        Out.say("\(shown) already has the current touchid-ssh-agent block. Nothing to change.")
+        return
+    }
+    Out.say(replacing
+        ? "The touchid-ssh-agent block in \(shown) will be replaced by the current one:"
+        : (exists ? "This block will be added at the end of \(shown):" : "\(shown) will be created with this block:"))
+    Out.say("\n" + aiSnippet.split(separator: "\n", omittingEmptySubsequences: false).map { "    " + $0 }.joined(separator: "\n"))
+    guard Terminal.ask("Write it? [y/N]: ")?.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("y") == true else {
+        Out.say("Nothing was changed. `\(tool) instructions --snippet` prints the block to paste yourself.")
+        return
+    }
+    try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let mode = ((try? FileManager.default.attributesOfItem(atPath: file.path))?[.posixPermissions] as? Int).map { mode_t($0) } ?? 0o644
+    try SecureFile.writeAtomically(Data(text.utf8), to: file, mode: mode)
+    Out.say("""
+    ✓ \(replacing ? "Updated" : "Added") the block in \(shown).
+    Agents that read this file will find temporary access. They can request it, but every
+    grant still needs your Touch ID, and servers must be enrolled first with
+    `\(tool) authorize HOST --temporary-access`.
+    """)
+}

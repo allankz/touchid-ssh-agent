@@ -64,6 +64,21 @@ public struct AgentPaths: Equatable {
     public var inventoryFile: URL { directory.appendingPathComponent("inventory.json") }
     /// Scratch space for building the emergency kit; erased once it is saved.
     public var kitDirectory: URL { directory.appendingPathComponent("kit") }
+    /// Serializes read-modify-write of the inventory across processes.
+    public var inventoryLockFile: URL { directory.appendingPathComponent("inventory.lock") }
+
+    // Temporary access (Phase 2). The CA is a second Secure Enclave key that only
+    // signs short-lived certificates; it is never offered on any agent socket.
+    public var caKeyFile: URL { directory.appendingPathComponent("ca.se") }
+    public var caPublicKeyFile: URL { directory.appendingPathComponent("ca.pub") }
+    public var caSerialFile: URL { directory.appendingPathComponent("ca.serial") }
+    public var caSerialLockFile: URL { directory.appendingPathComponent("ca.serial.lock") }
+    public var accessDirectory: URL { directory.appendingPathComponent("access") }
+    /// One private directory per grant: socket, public files, ssh_config, manifest.
+    public var grantsDirectory: URL { accessDirectory.appendingPathComponent("grants") }
+    /// Serializes grant issuance, stop and cleanup.
+    public var accessLockFile: URL { accessDirectory.appendingPathComponent("lifecycle.lock") }
+    public var accessLogFile: URL { directory.appendingPathComponent("access.log") }
 
     /// Path suitable for ssh_config, using `~` when inside the home directory.
     public func displayPath(_ url: URL) -> String {
@@ -75,15 +90,28 @@ public struct AgentPaths: Equatable {
     /// Creates the directory with mode 0700 or verifies an existing one: it must be
     /// a real directory owned by the current user. Group/other bits are removed.
     public func ensureDirectory() throws {
+        try AgentPaths.ensurePrivateDirectory(directory)
+    }
+
+    /// `access/` and `access/grants/`, both 0700 and owned by this user.
+    public func ensureAccessDirectories() throws {
+        try ensureDirectory()
+        try AgentPaths.ensurePrivateDirectory(accessDirectory)
+        try AgentPaths.ensurePrivateDirectory(grantsDirectory)
+    }
+
+    static func ensurePrivateDirectory(_ directory: URL) throws {
         var info = stat()
         if lstat(directory.path, &info) != 0 {
             guard errno == ENOENT else {
                 throw IdentityStoreError.insecureDirectory(String(cString: strerror(errno)))
             }
-            guard mkdir(directory.path, 0o700) == 0 else {
+            if mkdir(directory.path, 0o700) == 0 { return }
+            // Another process (or thread) may have created it in the meantime;
+            // then it is checked like any existing directory.
+            guard errno == EEXIST, lstat(directory.path, &info) == 0 else {
                 throw IdentityStoreError.insecureDirectory(String(cString: strerror(errno)))
             }
-            return
         }
         guard info.st_mode & S_IFMT == S_IFDIR else {
             throw IdentityStoreError.insecureDirectory("\(directory.path) is not a regular directory")
@@ -168,10 +196,22 @@ public enum IdentityStore {
         flags: SecAccessControlCreateFlags,
         comment: String
     ) throws -> StoredIdentity {
+        try createKey(in: paths, keyFile: paths.keyFile, publicKeyFile: paths.publicKeyFile, flags: flags, comment: comment)
+    }
+
+    /// Creates a Secure Enclave key whose wrapped blob goes to `keyFile` and
+    /// whose public line goes to `publicKeyFile`. Shared by the login key and the CA.
+    static func createKey(
+        in paths: AgentPaths,
+        keyFile: URL,
+        publicKeyFile: URL,
+        flags: SecAccessControlCreateFlags,
+        comment: String
+    ) throws -> StoredIdentity {
         guard SecureEnclave.isAvailable else { throw IdentityStoreError.secureEnclaveUnavailable }
         try paths.ensureDirectory()
-        guard !FileManager.default.fileExists(atPath: paths.keyFile.path) else {
-            throw IdentityStoreError.identityAlreadyExists(paths.keyFile)
+        guard !FileManager.default.fileExists(atPath: keyFile.path) else {
+            throw IdentityStoreError.identityAlreadyExists(keyFile)
         }
 
         var error: Unmanaged<CFError>?
@@ -195,16 +235,20 @@ public enum IdentityStore {
             comment: DisplayText.sanitize(comment, maxLength: 120)
         )
         // Without a key file, any .pub left behind is stale.
-        try? FileManager.default.removeItem(at: paths.publicKeyFile)
-        try writeFile(paths.keyFile, contents: identity.wrappedKey, mode: 0o600)
-        try writeFile(paths.publicKeyFile, contents: Data((identity.authorizedKeyLine + "\n").utf8), mode: 0o644)
+        try? FileManager.default.removeItem(at: publicKeyFile)
+        try writeFile(keyFile, contents: identity.wrappedKey, mode: 0o600)
+        try writeFile(publicKeyFile, contents: Data((identity.authorizedKeyLine + "\n").utf8), mode: 0o644)
         return identity
     }
 
     /// Loads the identity, or returns nil when none has been created.
     /// Reading the public key does not require Touch ID.
     public static func load(from paths: AgentPaths) throws -> StoredIdentity? {
-        guard let wrapped = FileManager.default.contents(atPath: paths.keyFile.path) else {
+        try loadKey(keyFile: paths.keyFile, publicKeyFile: paths.publicKeyFile, defaultComment: defaultComment())
+    }
+
+    static func loadKey(keyFile: URL, publicKeyFile: URL, defaultComment: String) throws -> StoredIdentity? {
+        guard let wrapped = FileManager.default.contents(atPath: keyFile.path) else {
             return nil
         }
         let key: SecureEnclave.P256.Signing.PrivateKey
@@ -215,8 +259,8 @@ public enum IdentityStore {
         }
         let publicKeyBlob = SSHKeyFormat.publicKeyBlob(key.publicKey)
         // The comment comes from the .pub file only if it describes this same key.
-        var comment = defaultComment()
-        if let line = try? String(contentsOf: paths.publicKeyFile, encoding: .utf8),
+        var comment = defaultComment
+        if let line = try? String(contentsOf: publicKeyFile, encoding: .utf8),
            SSHKeyFormat.blob(fromPublicKeyLine: line) == publicKeyBlob {
             let fields = line.trimmingCharacters(in: .whitespacesAndNewlines)
                 .split(separator: " ", maxSplits: 2)

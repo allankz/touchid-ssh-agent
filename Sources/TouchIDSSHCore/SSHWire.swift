@@ -41,6 +41,12 @@ public struct SSHReader {
             | UInt32(bytes[offset + 3])
     }
 
+    public mutating func readUInt64() throws -> UInt64 {
+        let high = try readUInt32()
+        let low = try readUInt32()
+        return UInt64(high) << 32 | UInt64(low)
+    }
+
     public mutating func readBytes(_ count: Int) throws -> Data {
         guard count >= 0 else { throw SSHWireError.lengthTooLarge }
         guard remaining >= count else { throw SSHWireError.truncated }
@@ -104,6 +110,11 @@ public struct SSHWriter {
             UInt8(truncatingIfNeeded: value >> 8),
             UInt8(truncatingIfNeeded: value),
         ])
+    }
+
+    public mutating func writeUInt64(_ value: UInt64) {
+        writeUInt32(UInt32(truncatingIfNeeded: value >> 32))
+        writeUInt32(UInt32(truncatingIfNeeded: value))
     }
 
     public mutating func writeString(_ value: Data) {

@@ -249,7 +249,8 @@ public enum EmergencyKitBuilder {
            For security it asks for the passphrase twice, one right after
            the other: once to open the inventory, once to load this key.
            It checks every server, asks whether to replace this emergency
-           key, installs the new Mac's keys, removes the lost Mac's key,
+           key, installs the new Mac's keys, removes the lost Mac's key
+           (and its temporary-access CA, where the inventory lists one),
            and finishes with an audit.
 
         On any other computer, with OpenSSH and age (https://age-encryption.org):
@@ -263,6 +264,11 @@ public enum EmergencyKitBuilder {
         4. On each server, remove the line with the lost Mac's login key
            (fingerprint above) from ~/.ssh/authorized_keys. To see each
            line's fingerprint: ssh-keygen -lf ~/.ssh/authorized_keys
+           If the inventory shows "temporaryAccess" for a server, also
+           remove the lines starting with cert-authority whose fingerprint
+           is that entry's "caFingerprint", or one named in its
+           "caRotation": they are the lost Mac's CAs. Their private keys
+           are not needed to remove them.
         5. On your new Mac run `touchid-ssh-agent setup`, which creates a new
            kit, then `touchid-ssh-agent authorize` for every server.
         6. Remove this emergency key from the servers afterwards: once it has

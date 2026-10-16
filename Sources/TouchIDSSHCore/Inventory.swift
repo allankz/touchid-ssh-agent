@@ -49,11 +49,15 @@ public struct InventoryEntry: Codable, Equatable {
     /// Server host keys (`type base64`) as trusted when the entry was
     /// recorded, so a recovery from a new Mac can verify the server.
     public var hostKeys: [String]?
+    /// CA trust for temporary access, when the user enrolled this server with
+    /// `authorize --temporary-access`. Nil means not enrolled.
+    public var temporaryAccess: TemporaryAccessEnrollment?
 
     public init(
         alias: String, destination: String, hostname: String, user: String, port: Int,
         sshConfigFile: String?, loginKeyFingerprint: String, recoveryKeyFingerprint: String,
-        authorizedAt: Date, lastAudit: Date? = nil, lastAuditResult: String? = nil, hostKeys: [String]? = nil
+        authorizedAt: Date, lastAudit: Date? = nil, lastAuditResult: String? = nil, hostKeys: [String]? = nil,
+        temporaryAccess: TemporaryAccessEnrollment? = nil
     ) {
         self.alias = alias
         self.destination = destination
@@ -67,6 +71,163 @@ public struct InventoryEntry: Codable, Equatable {
         self.lastAudit = lastAudit
         self.lastAuditResult = lastAuditResult
         self.hostKeys = hostKeys
+        self.temporaryAccess = temporaryAccess
+    }
+
+    /// The same server and account: hostname, user and port.
+    public func isSameServer(as other: InventoryEntry) -> Bool {
+        hostname == other.hostname && user == other.user && port == other.port
+    }
+}
+
+/// Durable CA trust on one server account. It is part of the inventory backup;
+/// nothing in it is secret, and it never describes a live grant.
+public struct TemporaryAccessEnrollment: Codable, Equatable {
+    /// Stable, opaque identifier of this server account.
+    public var targetId: String
+    /// The only principal the server's CA line accepts.
+    public var principal: String
+    /// `ecdsa-sha2-nistp256 BASE64 comment` of the trusted CA.
+    public var caPublicKey: String
+    public var caFingerprint: String
+    /// Options of the `cert-authority` line, exactly as installed.
+    public var authorizedKeyOptions: String
+    public var enrolledAt: Date
+    /// False when the line was installed but a certificate login was never
+    /// confirmed; `access` refuses such targets.
+    public var verified: Bool
+    public var lastAudit: Date?
+    public var lastAuditResult: String?
+    /// The most recent grant only, so the inventory never grows with history.
+    public var lastGrant: GrantSummary?
+    /// CA replacement in progress (recovery on a new Mac, or a new CA). Kept
+    /// until the old CA's removal is verified on this server.
+    public var caRotation: CARotation?
+    /// CAs this server trusted before and that were removed from it (a lost
+    /// Mac's CA after recovery, or this Mac's previous CA).
+    public var retiredCAFingerprints: [String]?
+
+    public init(targetId: String, principal: String, caPublicKey: String, caFingerprint: String,
+                authorizedKeyOptions: String, enrolledAt: Date, verified: Bool) {
+        self.targetId = targetId
+        self.principal = principal
+        self.caPublicKey = caPublicKey
+        self.caFingerprint = caFingerprint
+        self.authorizedKeyOptions = authorizedKeyOptions
+        self.enrolledAt = enrolledAt
+        self.verified = verified
+    }
+
+    /// The CA key blob, but only when it matches the recorded fingerprint.
+    public var caBlob: Data? { CAKey(publicKey: caPublicKey, fingerprint: caFingerprint).blob }
+
+    /// Every CA this record says the server may trust: the enrolled one and,
+    /// while a replacement is pending, its old and new CAs.
+    public var recordedCAs: [CAKey] {
+        var keys = [CAKey(publicKey: caPublicKey, fingerprint: caFingerprint)]
+        if let rotation = caRotation {
+            keys += rotation.oldCAs
+            keys.append(CAKey(publicKey: rotation.newCAPublicKey, fingerprint: rotation.newCAFingerprint))
+        }
+        var seen = Set<String>()
+        return keys.filter { seen.insert($0.fingerprint).inserted }
+    }
+}
+
+/// A CA public key line and its fingerprint, as recorded in the inventory.
+public struct CAKey: Codable, Equatable {
+    public var publicKey: String
+    public var fingerprint: String
+
+    public init(publicKey: String, fingerprint: String) {
+        self.publicKey = publicKey
+        self.fingerprint = fingerprint
+    }
+
+    /// The key blob, only when it matches the recorded fingerprint, so a
+    /// damaged record never leads to removing some other key.
+    public var blob: Data? {
+        guard let blob = SSHKeyFormat.blob(fromPublicKeyLine: publicKey),
+              SSHKeyFormat.fingerprint(blob: blob) == fingerprint else { return nil }
+        return blob
+    }
+}
+
+/// Bounded summary of the latest grant for one target. Live paths and process
+/// identity stay in the grant's local manifest.
+public struct GrantSummary: Codable, Equatable {
+    public var grantId: String
+    public var serial: UInt64
+    public var temporaryKeyFingerprint: String
+    public var sshAlias: String
+    public var issuedAt: Date
+    public var expiresAt: Date
+    public var forceCommand: String?
+    public var pty: Bool
+    public var endedAt: Date?
+    /// expired, stopped, crashed, readiness-failed or abandoned.
+    public var endReason: String?
+
+    public init(grantId: String, serial: UInt64, temporaryKeyFingerprint: String, sshAlias: String,
+                issuedAt: Date, expiresAt: Date, forceCommand: String?, pty: Bool) {
+        self.grantId = grantId
+        self.serial = serial
+        self.temporaryKeyFingerprint = temporaryKeyFingerprint
+        self.sshAlias = sshAlias
+        self.issuedAt = issuedAt
+        self.expiresAt = expiresAt
+        self.forceCommand = forceCommand
+        self.pty = pty
+    }
+}
+
+/// Progress of replacing one server's CA trust. Written before the server is
+/// changed, so an interruption never loses the old CA that still needs removal.
+public struct CARotation: Codable, Equatable {
+    public enum Step: String, Codable {
+        /// Nothing changed on the server yet.
+        case planned
+        /// The new keys and CA line were added; nothing verified yet.
+        case replacementAdded = "replacement-added"
+        /// The new login and a certificate through the new CA both worked.
+        case replacementVerified = "replacement-verified"
+        /// Removal of the retired keys and old CA was attempted.
+        case retirementStarted = "retirement-started"
+    }
+
+    public var recoveryId: String
+    public var oldCAPublicKey: String
+    public var oldCAFingerprint: String
+    public var newCAPublicKey: String
+    public var newCAFingerprint: String
+    public var principal: String
+    public var authorizedKeyOptions: String
+    public var step: Step
+    public var updatedAt: Date
+    /// More old CAs to remove, when the lost Mac itself left a replacement
+    /// unfinished (its previous CA and its own).
+    public var extraOldCAs: [CAKey]?
+
+    public init(recoveryId: String, oldCAPublicKey: String, oldCAFingerprint: String, newCAPublicKey: String,
+                newCAFingerprint: String, principal: String, authorizedKeyOptions: String, step: Step, updatedAt: Date) {
+        self.recoveryId = recoveryId
+        self.oldCAPublicKey = oldCAPublicKey
+        self.oldCAFingerprint = oldCAFingerprint
+        self.newCAPublicKey = newCAPublicKey
+        self.newCAFingerprint = newCAFingerprint
+        self.principal = principal
+        self.authorizedKeyOptions = authorizedKeyOptions
+        self.step = step
+        self.updatedAt = updatedAt
+    }
+
+    /// The old CA key blob, only when it matches its recorded fingerprint, so a
+    /// damaged record never leads to removing some other key.
+    public var oldCABlob: Data? { CAKey(publicKey: oldCAPublicKey, fingerprint: oldCAFingerprint).blob }
+
+    /// Every old CA this replacement removes.
+    public var oldCAs: [CAKey] {
+        [CAKey(publicKey: oldCAPublicKey, fingerprint: oldCAFingerprint)] + (extraOldCAs ?? [])
     }
 }
 
@@ -113,6 +274,20 @@ public enum InventoryStore {
     public static func save(_ inventory: Inventory, to paths: AgentPaths) throws {
         try paths.ensureDirectory()
         try SecureFile.writeAtomically(try JSON.encode(inventory), to: paths.inventoryFile, mode: 0o600)
+    }
+
+    /// Reads the current inventory, applies `change` and saves it, all under
+    /// the inventory lock. Every writer goes through here, so a slow command or
+    /// a background grant never overwrites newer entries with an old snapshot.
+    @discardableResult
+    public static func update<T>(_ paths: AgentPaths, _ change: (inout Inventory) throws -> T) throws -> T {
+        try paths.ensureDirectory()
+        return try FileLock.withLock(paths.inventoryLockFile, timeout: 60) {
+            var inventory = try load(from: paths)
+            let result = try change(&inventory)
+            try save(inventory, to: paths)
+            return result
+        }
     }
 }
 

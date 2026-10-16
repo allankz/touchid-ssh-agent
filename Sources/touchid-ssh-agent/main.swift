@@ -4,7 +4,7 @@ import Foundation
 import LocalAuthentication
 import TouchIDSSHCore
 
-let version = "0.1.0"
+let version = "0.2.0"
 let tool = "touchid-ssh-agent"
 
 /// The help text, grouped by what the user is doing.
@@ -12,19 +12,23 @@ var usage: String {
     func section(_ title: String, _ lines: String) -> String { Out.bold(title) + "\n" + lines }
     return [
         "\(tool) \(version) — SSH agent with a Secure Enclave key and Touch ID for every signature",
-        "Usage: \(tool) COMMAND [OPTIONS]",
+        "Usage: \(tool) COMMAND [OPTIONS]\nAI agents: run `\(tool) instructions` first. It explains how to use this tool.",
         section("Getting started", """
           setup [--biometry current-set|any] [--comment TEXT]
                             Guided setup: Touch ID key, backup folder and emergency kit.
           install [--force] Starts the agent with your session (LaunchAgent).
-          authorize [user@]host [-p PORT] [-F SSH_CONFIG] [--alias NAME] [-- SSH_ARGS]
+          authorize [user@]host [-p PORT] [-F SSH_CONFIG] [--alias NAME] [--temporary-access] [-- SSH_ARGS]
                             Installs both keys on a server, checks the Touch ID login,
                             offers a ~/.ssh/config block and updates the inventory.
+                            --temporary-access also trusts this Mac's CA there, once,
+                            so `access` can grant temporary logins to it.
         """),
         section("Day to day", """
-          status            Secure Enclave, Touch ID, keys, agent, backup and inventory.
+          status            Secure Enclave, Touch ID, keys, agent, backup, inventory and
+                            temporary access.
           inventory         Lists the servers in the inventory.
-          audit [NAME...]   Checks that every server still has both keys (one Touch ID each).
+          audit [NAME...]   Checks that every server still has both keys and, where enrolled,
+                            the CA's scope (one Touch ID each).
           deauthorize NAME... | --all [-F SSH_CONFIG] [-p PORT] [-- SSH_ARGS]
                             Removes this Mac's keys from servers and drops them from the
                             inventory. --all does every server, then offers to delete
@@ -33,6 +37,20 @@ var usage: String {
                             Prints a ~/.ssh/config block. Changes no file.
           set backup-path DIR|none
                             Folder, ideally synced to the cloud, for the encrypted inventory.
+        """),
+        section("Temporary access", """
+          access HOST[,HOST...] --for DURATION [--force-command COMMAND] [--allow-pty] [--json]
+                            Requests a temporary grant; one Touch ID approves issuance.
+          access status [--json]
+                            Shows validity, selected targets, aliases and exact SSH commands.
+          access stop [--json]
+                            Stops the active grant and removes its local generated files.
+          access cleanup [--json]
+                            Removes stale generated files; keeps live, valid grants.
+          access help       Enrollment, inventory, aliases, cleanup and limits in detail.
+          instructions [--snippet | --add-to FILE]
+                            Prints the workflow for AI agents. --snippet prints a short block
+                            for CLAUDE.md or AGENTS.md; --add-to writes it there after asking.
         """),
         section("New Mac and recovery", """
           migrate           Shows, with this Mac's data, how to move to a new Mac.
@@ -62,6 +80,10 @@ var usage: String {
         """
         Directory: \(AgentPaths.defaultDirectory.path) (or $\(AgentPaths.environmentVariable)).
         Time to approve Touch ID: 60 s (or $TOUCHID_SSH_AGENT_PROMPT_TIMEOUT).
+        For AI agents: `\(tool) instructions` prints how to use temporary SSH access.
+        To make your agent read it, add a pointer to its instructions file once:
+            \(tool) instructions --add-to ~/.claude/CLAUDE.md   (Claude Code)
+            \(tool) instructions --add-to ~/.codex/AGENTS.md    (Codex)
         """,
     ].joined(separator: "\n\n")
 }
@@ -286,6 +308,22 @@ func uninstall() throws {
 }
 
 
+func runAccessJob(directory: String, digest: String, paths: AgentPaths) -> Never {
+    signal(SIGPIPE, SIG_IGN)
+    let job = AccessJob(paths: paths, grantDirectory: URL(fileURLWithPath: directory), digest: digest)
+    var sources: [DispatchSourceSignal] = []
+    // launchd bootout and logout send SIGTERM: end the grant and clean up.
+    for signalNumber in [SIGINT, SIGTERM, SIGHUP] {
+        signal(signalNumber, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: DispatchQueue.global())
+        source.setEventHandler { job.requestEnd("stopped") }
+        source.resume()
+        sources.append(source)
+    }
+    let status = withExtendedLifetime(sources) { job.run() }
+    exit(status)
+}
+
 // MARK: - Entry point
 
 let arguments = CommandLine.arguments.dropFirst()
@@ -293,7 +331,8 @@ let paths = AgentPaths.fromEnvironment()
 let rest = arguments.dropFirst()
 
 /// Output meant for files and scripts stays bare; everything else gets spacing.
-let machineReadable: Set<String> = ["pubkey", "fingerprint", "config", "agent", "version", "--version"]
+let machineReadable: Set<String> = ["pubkey", "fingerprint", "config", "agent", "version", "--version",
+                                    "access", "access-job", "instructions"]
 if !machineReadable.contains(arguments.first ?? "help"), !(arguments.first == "recovery" && rest.first == "pubkey") {
     print("")
     atexit { print("") }
@@ -322,6 +361,12 @@ do {
     case "uninstall": try uninstall()
     case "deauthorize": try deauthorize(rest, paths: paths)
     case "migrate": try migrate(paths: paths)
+    case "access": access(rest, paths: paths)
+    case "instructions": try instructions(rest)
+    case "access-job":
+        // Internal: the process behind one grant, started by `access`.
+        guard rest.count == 2 else { throw UsageError(description: "access-job is started by `\(tool) access`") }
+        runAccessJob(directory: rest[rest.startIndex], digest: rest[rest.startIndex + 1], paths: paths)
     case "delete":
         // Replaced by deauthorize --all; kept so the old name explains where it went.
         throw UsageError(description: """

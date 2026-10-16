@@ -50,6 +50,35 @@ public enum SignError: Error, Equatable, CustomStringConvertible {
     }
 }
 
+/// Lets another thread withdraw a pending Touch ID prompt, for example when
+/// the command that asked for a temporary grant is interrupted.
+public final class SignCancellation {
+    private let lock = NSLock()
+    private weak var context: LAContext?
+    private var cancelled = false
+
+    public init() {}
+
+    public var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+
+    public func cancel() {
+        lock.lock()
+        cancelled = true
+        let context = self.context
+        lock.unlock()
+        context?.invalidate()
+    }
+
+    /// False when cancellation already happened, so no prompt should appear.
+    func attach(_ context: LAContext) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled else { return false }
+        self.context = context
+        return true
+    }
+}
+
 public enum SecureEnclaveSigner {
     public static let defaultPromptTimeout: TimeInterval = 60
 
@@ -57,12 +86,13 @@ public enum SecureEnclaveSigner {
     ///
     /// A fresh `LAContext` is created for every call and never reused, so the
     /// Secure Enclave asks for Touch ID on every signature. The prompt is
-    /// cancelled after `timeout` seconds.
+    /// cancelled after `timeout` seconds, or when `cancellation` fires.
     public static func sign(
         _ data: Data,
         with identity: StoredIdentity,
         reason: String,
-        timeout: TimeInterval = defaultPromptTimeout
+        timeout: TimeInterval = defaultPromptTimeout,
+        cancellation: SignCancellation? = nil
     ) throws -> Data {
         let context = LAContext()
         context.localizedReason = reason
@@ -70,6 +100,7 @@ public enum SecureEnclaveSigner {
         context.localizedCancelTitle = "Deny"
         // Biometry-only policy: hide the "Use Password" button.
         context.localizedFallbackTitle = ""
+        if let cancellation, !cancellation.attach(context) { throw SignError.canceled }
 
         let timer = DispatchWorkItem { [weak context] in context?.invalidate() }
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)

@@ -311,11 +311,12 @@ func requireRecoveryKey(_ paths: AgentPaths) throws -> RecoveryKey {
 }
 
 func authorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
-    let usageText = "usage: \(tool) authorize [user@]host [-p PORT] [-F SSH_CONFIG] [--alias NAME] [-- EXTRA_SSH_ARGS]"
+    let usageText = "usage: \(tool) authorize [user@]host [-p PORT] [-F SSH_CONFIG] [--alias NAME] [--temporary-access] [-- EXTRA_SSH_ARGS]"
     var destination: String?
     var port: Int?
     var configFile: String?
     var alias: String?
+    var temporaryAccess = false
     var extra: [String] = []
     var iterator = arguments.makeIterator()
     while let argument = iterator.next() {
@@ -329,6 +330,8 @@ func authorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
         case "--alias":
             guard let value = iterator.next() else { throw UsageError(description: usageText) }
             alias = value
+        case "--temporary-access":
+            temporaryAccess = true
         case "--":
             while let rest = iterator.next() { extra.append(rest) }
         default:
@@ -346,18 +349,35 @@ func authorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
 
     let target = SSHTarget(destination: destination, port: port, configFile: configFile, bootstrapArguments: extra)
     let resolved = try RemoteKeys.resolve(target)
-    Out.header("authorize", "install both keys on \(destination)")
-    let keys = [AuthorizedKey.login(identity), AuthorizedKey.recovery(recoveryKey)]
+    let existing = try InventoryStore.load(from: paths).servers.first {
+        $0.hostname == resolved.hostname && $0.port == resolved.port && $0.user == resolved.user
+    }
+    let plan = temporaryAccess ? try EnrollmentPlan.prepare(paths: paths, resolved: resolved, existing: existing) : nil
+    let steps = plan == nil ? 4 : 5
+    Out.header("authorize", plan == nil ? "install both keys on \(destination)" : "install both keys and the CA on \(destination)")
+    var keys = [AuthorizedKey.login(identity), AuthorizedKey.recovery(recoveryKey)]
     Out.say("""
     Authorizing \(resolved.user)@\(resolved.hostname):\(resolved.port)
       Touch ID key   \(identity.fingerprint)
       emergency key  \(recoveryKey.fingerprint)
     """)
+    if let plan {
+        keys.append(plan.key)
+        Out.say("  CA             \(plan.ca.fingerprint)\(plan.created ? " (new)" : ""), for principal \(plan.principal)")
+        try plan.recordIntent(paths: paths)
+    }
 
-    Out.section("1/4 Adding the keys (with your current access to the server)")
+    Out.section("1/\(steps) Adding the keys (with your current access to the server)")
     let report: [String: Bool]
+    var listing: [String] = []
     do {
-        report = try RemoteKeys.install(keys, on: target)
+        // Without --temporary-access, exactly the 0.1.0 script; the listing is
+        // only needed to check a CA line's scope.
+        if plan == nil {
+            report = try RemoteKeys.install(keys, on: target)
+        } else {
+            (report, listing) = try RemoteKeys.installAndList(keys, on: target)
+        }
     } catch {
         let portFlag = port.map { " -p \($0)" } ?? ""
         throw UsageError(description: """
@@ -368,38 +388,63 @@ func authorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
         so its port and keys apply. (\(error))
         """)
     }
+    let names = ["login": "Touch ID key ", "recovery": "emergency key", CATrust.label: "CA trust     "]
     for key in keys {
-        Out.say("  \(key.label == "login" ? "Touch ID key " : "emergency key"): \(report[key.label] == true ? "added" : "already there")")
+        Out.say("  \(names[key.label] ?? key.label): \(report[key.label] == true ? "added" : "already there")")
     }
 
-    Out.section("2/4 Checking the Touch ID key (approve the Touch ID prompt)")
+    Out.section("2/\(steps) Checking the Touch ID key (approve the Touch ID prompt)")
     let check = RemoteKeys.verifyLogin(on: SSHTarget(destination: destination, port: port, configFile: configFile),
                                        paths: paths, identity: identity)
     Out.say("  \(describe(check))")
 
-    Out.section("3/4 ssh config")
+    var enrollment: TemporaryAccessEnrollment?
+    var enrolled = true
+    if let plan {
+        Out.section("3/\(steps) Checking a certificate login through the CA (approve the Touch ID prompt)")
+        let outcome = plan.verify(listing: listing, resolved: resolved, target: target, paths: paths)
+        enrollment = outcome.enrollment
+        enrolled = outcome.ok
+        for line in outcome.lines { Out.say("  " + line) }
+    }
+
+    Out.section("\(steps - 1)/\(steps) ssh config")
     let friendlyName = try offerSSHConfig(destination: destination, suggestedName: alias, resolved: resolved,
                                           configFile: configFile, paths: paths)
 
-    Out.section("4/4 Updating the inventory")
+    Out.section("\(steps)/\(steps) Updating the inventory")
     let entryAlias = friendlyName ?? alias ?? destination
-    var inventory = try InventoryStore.load(from: paths)
-    inventory.mac = IdentityStore.defaultComment()
-    // One entry per server: drop older entries for the same user, host and port.
-    inventory.servers.removeAll {
-        $0.hostname == resolved.hostname && $0.port == resolved.port && $0.user == resolved.user && $0.alias != entryAlias
+    let count = try InventoryStore.update(paths) { inventory -> Int in
+        inventory.mac = IdentityStore.defaultComment()
+        // Durable CA trust survives re-authorizing without --temporary-access.
+        let previous = inventory.servers.first {
+            $0.hostname == resolved.hostname && $0.port == resolved.port && $0.user == resolved.user
+        }?.temporaryAccess
+        // One entry per server: drop older entries for the same user, host and port.
+        inventory.servers.removeAll {
+            $0.hostname == resolved.hostname && $0.port == resolved.port && $0.user == resolved.user && $0.alias != entryAlias
+        }
+        inventory.upsert(InventoryEntry(
+            alias: entryAlias, destination: friendlyName ?? destination,
+            hostname: resolved.hostname, user: resolved.user, port: resolved.port, sshConfigFile: configFile,
+            loginKeyFingerprint: identity.fingerprint, recoveryKeyFingerprint: recoveryKey.fingerprint,
+            authorizedAt: .wholeSecondsNow, hostKeys: HostKeys.known(for: resolved),
+            temporaryAccess: enrollment ?? previous
+        ))
+        return inventory.servers.count
     }
-    inventory.upsert(InventoryEntry(
-        alias: entryAlias, destination: friendlyName ?? destination,
-        hostname: resolved.hostname, user: resolved.user, port: resolved.port, sshConfigFile: configFile,
-        loginKeyFingerprint: identity.fingerprint, recoveryKeyFingerprint: recoveryKey.fingerprint,
-        authorizedAt: .wholeSecondsNow, hostKeys: HostKeys.known(for: resolved)
-    ))
-    try InventoryStore.save(inventory, to: paths)
-    Out.say("  \(entryAlias) saved (\(inventory.servers.count) server\(inventory.servers.count == 1 ? "" : "s") in the inventory).")
+    Out.say("  \(entryAlias) saved (\(count) server\(count == 1 ? "" : "s") in the inventory)\(enrollment?.verified == true ? ", with temporary access" : "").")
     reportBackup(InventoryBackup.export(paths: paths), paths: paths)
+    if plan != nil, enrolled {
+        Out.say("""
 
-    guard check == .ok else { exit(1) }
+        Request temporary access with: \(tool) access \(entryAlias) --for 2h
+        To let an AI agent request it, add the instructions to its file once, for example:
+            \(tool) instructions --add-to ~/.claude/CLAUDE.md
+        """)
+    }
+
+    guard check == .ok, enrolled else { exit(1) }
 }
 
 /// Step 3 of authorize: make `ssh NAME` use the Touch ID agent. Returns a new
@@ -511,10 +556,12 @@ func audit(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
 }
 
 /// Checks the inventory servers named in `aliases` (all when empty), records
-/// the results and returns how many need attention.
+/// the results and returns how many need attention. `exportBackup` is false
+/// when the backup must stay as it is (a partial recovery: the old kit has to
+/// open it again).
 @discardableResult
-func runAudit(aliases wanted: Set<String>, paths: AgentPaths) throws -> Int {
-    var inventory = try InventoryStore.load(from: paths)
+func runAudit(aliases wanted: Set<String>, paths: AgentPaths, exportBackup: Bool = true) throws -> Int {
+    let inventory = try InventoryStore.load(from: paths)
     let entries = inventory.servers.filter { wanted.isEmpty || wanted.contains($0.alias) }
     guard !entries.isEmpty else {
         Out.say("No server named \(wanted.sorted().joined(separator: ", ")) in the inventory.")
@@ -523,32 +570,81 @@ func runAudit(aliases wanted: Set<String>, paths: AgentPaths) throws -> Int {
     let identity = requireIdentity(paths)
     let recoveryKey = try requireRecoveryKey(paths)
     let keys = [AuthorizedKey.login(identity), AuthorizedKey.recovery(recoveryKey)]
+    let ca = try? CertificateAuthorityStore.load(from: paths)
 
     Out.say("Checking \(entries.count) server\(entries.count == 1 ? "" : "s"); each one asks for Touch ID.")
     var problems = 0
+    var results: [(alias: String, text: String, hostKeys: [String]?, temporary: String?)] = []
     for entry in entries {
         Out.say("\n\(entry.alias)  (\(entry.user)@\(entry.hostname):\(entry.port))")
         let target = SSHTarget(destination: entry.destination, port: entry.port, configFile: entry.sshConfigFile)
-        let outcome = RemoteKeys.audit(target, keys: keys, paths: paths, identity: identity)
+        let outcome = RemoteKeys.audit(target, keys: keys, paths: paths, identity: identity, listing: entry.temporaryAccess != nil)
         let result = auditSummary(outcome)
         Out.say("  \(result.ok ? "✓" : "✗") \(result.text)")
-        if !result.ok { problems += 1 }
+        var serverOK = result.ok
+        var temporary: String?
+        if let enrollment = entry.temporaryAccess {
+            let check = auditTemporaryAccess(enrollment, listing: outcome.listing, currentCA: ca)
+            Out.say("  \(check.ok ? "✓" : "✗") temporary access: \(check.text)")
+            temporary = check.text
+            serverOK = serverOK && check.ok
+        }
+        if !serverOK { problems += 1 }
         let config = sshConfigStatus(for: entry, paths: paths)
         Out.say("  \(config.ok ? "✓" : "!") \(config.text)")
-        if let index = inventory.servers.firstIndex(where: { $0.alias == entry.alias }) {
+        // Backfill host keys for entries recorded before they were stored.
+        var hostKeys: [String]?
+        if outcome.login == .ok, let resolved = try? RemoteKeys.resolve(target) {
+            let known = HostKeys.known(for: resolved)
+            if !known.isEmpty { hostKeys = known }
+        }
+        results.append((entry.alias, result.text, hostKeys, temporary))
+    }
+    // Merged into the current inventory, which may have changed meanwhile.
+    try InventoryStore.update(paths) { inventory in
+        for result in results {
+            guard let index = inventory.servers.firstIndex(where: { $0.alias == result.alias }) else { continue }
             inventory.servers[index].lastAudit = .wholeSecondsNow
             inventory.servers[index].lastAuditResult = result.text
-            // Backfill host keys for entries recorded before they were stored.
-            if outcome.login == .ok, let resolved = try? RemoteKeys.resolve(target) {
-                let keys = HostKeys.known(for: resolved)
-                if !keys.isEmpty { inventory.servers[index].hostKeys = keys }
+            if let hostKeys = result.hostKeys { inventory.servers[index].hostKeys = hostKeys }
+            if let temporary = result.temporary, inventory.servers[index].temporaryAccess != nil {
+                inventory.servers[index].temporaryAccess?.lastAudit = .wholeSecondsNow
+                inventory.servers[index].temporaryAccess?.lastAuditResult = temporary
             }
         }
     }
-    try InventoryStore.save(inventory, to: paths)
-    reportBackup(InventoryBackup.export(paths: paths), paths: paths)
+    if exportBackup { reportBackup(InventoryBackup.export(paths: paths), paths: paths) }
     Out.say(problems == 0 ? "\nAll servers have both keys." : "\n\(problems) server\(problems == 1 ? "" : "s") need attention: run `\(tool) authorize` for them.")
     return problems
+}
+
+/// Checks one server's CA trust from its authorized_keys: the recorded CA is
+/// there, scoped to the recorded principal with no broader line, and no
+/// retired CA is still trusted.
+func auditTemporaryAccess(_ enrollment: TemporaryAccessEnrollment, listing: [String]?,
+                          currentCA: StoredIdentity?) -> (ok: Bool, text: String) {
+    guard let listing else { return (false, "not checked (the login failed)") }
+    guard let caBlob = enrollment.caBlob else {
+        return (false, "the recorded CA key does not match its fingerprint; run `\(tool) authorize HOST --temporary-access`")
+    }
+    let retired = Set((enrollment.retiredCAFingerprints ?? []) + (enrollment.caRotation?.oldCAs.map(\.fingerprint) ?? []))
+        .subtracting([enrollment.caFingerprint])
+    let report = CATrust.inspect(listing, caBlob: caBlob, principal: enrollment.principal, retiredFingerprints: retired)
+    var text = report.summary + " (principal \(enrollment.principal))"
+    var ok = report.isScoped && report.retiredLines == 0
+    if let rotation = enrollment.caRotation {
+        text += "; CA replacement pending (\(rotation.step.rawValue))"
+        ok = false
+    }
+    if let currentCA, currentCA.fingerprint != enrollment.caFingerprint {
+        text += "; enrolled with another CA (\(enrollment.caFingerprint))"
+        ok = false
+    }
+    if !enrollment.verified {
+        text += "; the certificate login was never confirmed"
+        ok = false
+    }
+    return (ok, text)
 }
 
 func auditSummary(_ outcome: AuditOutcome) -> (ok: Bool, text: String) {
@@ -574,10 +670,23 @@ func listInventory(paths: AgentPaths) throws {
         return
     }
     let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd"
+    formatter.dateFormat = "yyyy-MM-dd HH:mm"
     for entry in inventory.servers {
         let audited = entry.lastAudit.map { "audited \(formatter.string(from: $0)): \(entry.lastAuditResult ?? "")" } ?? "never audited"
         Out.say("\(entry.alias)\t\(entry.user)@\(entry.hostname):\(entry.port)\tauthorized \(formatter.string(from: entry.authorizedAt))\t\(audited)")
+        if let enrollment = entry.temporaryAccess {
+            Out.say("  temporary access: \(enrollment.verified ? "enrolled" : "NOT confirmed"), CA \(enrollment.caFingerprint), "
+                + "principal \(enrollment.principal)"
+                + (enrollment.lastAudit.map { ", audited \(formatter.string(from: $0)): \(enrollment.lastAuditResult ?? "")" } ?? ""))
+            if let rotation = enrollment.caRotation {
+                Out.say("  CA replacement pending (\(rotation.step.rawValue)): \(rotation.oldCAFingerprint) → \(rotation.newCAFingerprint)")
+            }
+            if let grant = enrollment.lastGrant {
+                let end = grant.endedAt.map { "ended \(formatter.string(from: $0)) (\(grant.endReason ?? "ended"))" }
+                    ?? "until \(formatter.string(from: grant.expiresAt)), if still running"
+                Out.say("  latest grant: \(grant.grantId), serial \(grant.serial), \(end). `\(tool) access status` shows live grants.")
+            }
+        }
     }
 }
 
@@ -613,13 +722,48 @@ func recoveryStatus(paths: AgentPaths) {
         Out.say("age:            not installed — `brew install age` (needed for the inventory backup)")
     }
 
-    let count = (try? InventoryStore.load(from: paths).servers.count) ?? 0
+    let inventory = (try? InventoryStore.load(from: paths)) ?? Inventory()
+    let count = inventory.servers.count
     Out.say("Inventory:      \(count) server\(count == 1 ? "" : "s")")
+    temporaryAccessStatus(paths: paths, inventory: inventory)
 
     let fileVault = (try? Command.run("/usr/bin/fdesetup", ["status"]))?.stdoutText ?? ""
     if fileVault.contains("FileVault is On") {
         Out.say("FileVault:      on")
     } else {
         Out.say("FileVault:      OFF — turn it on (System Settings > Privacy & Security) to protect the local inventory")
+    }
+}
+
+/// CA, enrollments, pending replacements and the live grant, for `status`.
+func temporaryAccessStatus(paths: AgentPaths, inventory: Inventory) {
+    let enrolled = inventory.servers.filter { $0.temporaryAccess != nil }
+    do {
+        if let ca = try CertificateAuthorityStore.load(from: paths) {
+            let current = enrolled.filter { $0.temporaryAccess?.caFingerprint == ca.fingerprint }.count
+            Out.say("Temporary CA:   \(ca.fingerprint) (\(current) server\(current == 1 ? "" : "s") enrolled)")
+            let other = enrolled.count - current
+            if other > 0 {
+                Out.say("                ! \(other) server\(other == 1 ? " trusts" : "s trust") another CA; run `\(tool) authorize HOST --temporary-access` for them")
+            }
+        } else {
+            Out.say("Temporary CA:   none — `\(tool) authorize HOST --temporary-access` creates it")
+        }
+    } catch {
+        Out.say("Temporary CA:   error — \(error)")
+    }
+    let pending = enrolled.filter { $0.temporaryAccess?.caRotation != nil }
+    if !pending.isEmpty {
+        Out.say("CA replacement: pending on \(pending.map(\.alias).joined(separator: ", ")); run `\(tool) recover` again to finish it")
+    }
+    let inspections = GrantStore.inspectAll(paths: paths)
+    if let active = inspections.lazy.compactMap({ activeGrantDocument($0, paths: paths) }).first {
+        Out.say("Temporary access: grant \(active["grant_id"] as? String ?? "") active until \(active["expires_at_local"] as? String ?? "")")
+    } else if !enrolled.isEmpty || !inspections.isEmpty {
+        Out.say("Temporary access: no active grant")
+    }
+    let stale = staleList(inspections, excluding: nil, paths: paths)
+    if !stale.isEmpty {
+        Out.say("                \(stale.count) leftover grant director\(stale.count == 1 ? "y" : "ies") — `\(tool) access cleanup`")
     }
 }
