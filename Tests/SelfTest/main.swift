@@ -796,8 +796,9 @@ struct LiveAgent {
     var socket: String { paths.socket.path }
     var environment: [String: String] { ["SSH_AUTH_SOCK": socket] }
 
-    static func start(failingWith error: SignError? = nil) throws -> LiveAgent {
-        let directory = try makeTempDirectory()
+    /// `shortPath` puts the data directory under /tmp, so grant sockets fit.
+    static func start(failingWith error: SignError? = nil, shortPath: Bool = false) throws -> LiveAgent {
+        let directory = shortPath ? try makeShortTempDirectory() : try makeTempDirectory()
         do {
             let paths = AgentPaths(directory: directory.appendingPathComponent("a"))
             let identity = try IdentityStore.createWithoutUserPresenceForTesting(in: paths)
@@ -951,7 +952,19 @@ runAccessSecureEnclaveTests()
 
 // MARK: - Docker end-to-end
 
-if runDocker {
+/// `--access-only` (with --docker) runs only the temporary-access Docker tests.
+let accessOnly = CommandLine.arguments.contains("--access-only")
+if runDocker && accessOnly {
+    let dockerPath = ["/usr/local/bin/docker", "/opt/homebrew/bin/docker"].first { FileManager.default.isExecutableFile(atPath: $0) } ?? "docker"
+    let dockerfile = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("e2e")
+    test("builds the sshd container") {
+        let build = try run(dockerPath, ["build", "-q", "-t", "touchid-ssh-agent-e2e:local", dockerfile.path])
+        check(build.status == 0, "docker build: \(build.stderr)")
+    }
+    runAccessDockerTests(docker: dockerPath, image: "touchid-ssh-agent-e2e:local")
+}
+
+if runDocker && !accessOnly {
     print("Real SSH login against an sshd container (Docker)")
 
     let image = "touchid-ssh-agent-e2e:local"
@@ -1607,7 +1620,8 @@ if runDocker {
         check(try IdentityStore.load(from: leaver.paths) == nil, "Touch ID key deleted after DELETE")
         check(try RecoveryStore.load(from: leaver.paths) != nil, "emergency key still configured")
     }
-} else {
+    runAccessDockerTests(docker: docker, image: image)
+} else if !runDocker {
     print("(real Docker login skipped; use --docker)")
 }
 
