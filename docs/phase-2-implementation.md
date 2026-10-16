@@ -12,7 +12,7 @@
 | Inventory | `Inventory.swift`, `FileLock.swift` | Optional `temporaryAccess` per entry (scope, verification, latest grant, CA rotation progress, retired CA). Every writer merges under `inventory.lock`. |
 | Grant | `AccessGrant.swift`, `AccessJob.swift`, `AccessControl.swift`, `TemporaryAgent.swift`, `PowerManagement.swift`, `LaunchAgent.swift` | Frozen request with digest, manifest, dated aliases, isolated `ssh_config`, ownership-checked cleanup; the grant job (launchd label per grant, no restart), its control socket, the in-memory Ed25519 agent with a two-clock deadline, the idle-sleep assertion and wake checks; the authentication-only readiness check. |
 | Validation certificate | `CertificateValidation.swift` | A short-lived, memory-only certificate (`force-command true`) used by `authorize --temporary-access` and `recover` to prove a server accepts the CA. Never published as a grant. |
-| CLI | `AccessCommand.swift`, `Instructions.swift`, `TemporaryAccessSetup.swift`, `RecoverCA.swift`, `RecoveryCommands.swift`, `RecoverCommand.swift`, `DeauthorizeCommand.swift`, `MigrateCommand.swift`, `main.swift` | `access` and its subcommands, `instructions`, `authorize --temporary-access`, CA-aware `audit`, `inventory`, `status`, `deauthorize`, `migrate` and `recover`; the Temporary access help section. |
+| CLI | `AccessCommand.swift`, `Instructions.swift` (also `instructions --snippet` and `--add-to FILE`, which put the AI discovery block in `CLAUDE.md`, `AGENTS.md` or similar after asking), `TemporaryAccessSetup.swift`, `RecoverCA.swift`, `RecoveryCommands.swift`, `RecoverCommand.swift`, `DeauthorizeCommand.swift`, `MigrateCommand.swift`, `main.swift` | `access` and its subcommands, `instructions`, `authorize --temporary-access`, CA-aware `audit`, `inventory`, `status`, `deauthorize`, `migrate` and `recover`; the Temporary access help section. |
 | Kit | `Recovery.swift` | New kits explain how to remove the lost Mac's CA by hand. |
 | Tests | `Tests/SelfTest/AccessTests.swift`, `Tests/SelfTest/AccessDockerTests.swift`, `Tests/e2e/*`, `scripts/manual-touchid-test.sh` | Unit, Secure Enclave, Docker and interactive coverage below. The e2e sshd disables `PerSourcePenalties` (the tests fail logins on purpose from one NAT address) and accepts a test-only `SSHD_EXTRA`. |
 | Docs | `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `docs/*` | Behavior, threat model, the explicit temporary-key exception, AI workflow and limits. |
@@ -55,7 +55,7 @@ Final runs on this branch (2026-10-15), with the Mac unlocked:
 | Command | Result |
 | --- | --- |
 | `make build` | Passed (release build). |
-| `make test` | Passed: 55 tests (the 37 earlier tests unchanged, plus 18 new unit, Secure Enclave and in-process job tests). |
+| `make test` | Passed: 56 tests (the 37 earlier tests unchanged, plus 19 new unit, Secure Enclave, in-process job and instructions tests). |
 | `make test-docker` | Passed: 95 tests, including 15 temporary-access and 4 CA-recovery Docker tests next to the earlier Docker tests. |
 | `python3 -B scripts/verify-temporary-access-design.py` | Passed (the feasibility probe still works with the changed codec files and e2e image). |
 | `LAUNCH_ONLY=1 make test-touchid` | Passed: the agent runs under launchd and offers the test identity. |

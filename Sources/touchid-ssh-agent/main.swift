@@ -46,7 +46,9 @@ var usage: String {
           access cleanup [--json]
                             Removes stale generated files; keeps live, valid grants.
           access help       Enrollment, inventory, aliases, cleanup and limits in detail.
-          instructions      Prints the workflow for AI agents.
+          instructions [--snippet | --add-to FILE]
+                            Prints the workflow for AI agents. --snippet prints a short block
+                            for CLAUDE.md or AGENTS.md; --add-to writes it there after asking.
         """),
         section("New Mac and recovery", """
           migrate           Shows, with this Mac's data, how to move to a new Mac.
@@ -76,7 +78,8 @@ var usage: String {
         """
         Directory: \(AgentPaths.defaultDirectory.path) (or $\(AgentPaths.environmentVariable)).
         Time to approve Touch ID: 60 s (or $TOUCHID_SSH_AGENT_PROMPT_TIMEOUT).
-        AI agents: run `\(tool) instructions` for the temporary-access workflow.
+        AI agents: `\(tool) instructions --add-to ~/.claude/CLAUDE.md` (Claude Code) or
+        `~/.codex/AGENTS.md` (Codex) tells them about temporary access.
         """,
     ].joined(separator: "\n\n")
 }
@@ -355,7 +358,7 @@ do {
     case "deauthorize": try deauthorize(rest, paths: paths)
     case "migrate": try migrate(paths: paths)
     case "access": access(rest, paths: paths)
-    case "instructions": print(aiInstructions)
+    case "instructions": try instructions(rest)
     case "access-job":
         // Internal: the process behind one grant, started by `access`.
         guard rest.count == 2 else { throw UsageError(description: "access-job is started by `\(tool) access`") }

@@ -430,7 +430,12 @@ func authorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
     Out.say("  \(entryAlias) saved (\(count) server\(count == 1 ? "" : "s") in the inventory)\(enrollment?.verified == true ? ", with temporary access" : "").")
     reportBackup(InventoryBackup.export(paths: paths), paths: paths)
     if plan != nil, enrolled {
-        Out.say("\nRequest temporary access with: \(tool) access \(entryAlias) --for 2h")
+        Out.say("""
+
+        Request temporary access with: \(tool) access \(entryAlias) --for 2h
+        To let an AI agent request it, add the instructions to its file once, for example:
+            \(tool) instructions --add-to ~/.claude/CLAUDE.md
+        """)
     }
 
     guard check == .ok, enrolled else { exit(1) }

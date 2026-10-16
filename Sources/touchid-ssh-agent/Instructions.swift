@@ -62,7 +62,12 @@ Limits
   The temporary key is a software key held in the grant job's memory. Jump hosts and
   proxy commands are not supported for temporary access yet.
 
-AI agents: run `\(tool) instructions`.
+AI agents
+  instructions                 The workflow, written for the agent (Markdown).
+  instructions --snippet       A short block for CLAUDE.md, AGENTS.md or similar files.
+  instructions --add-to FILE   Adds that block to FILE, or updates it, after asking.
+                               For example ~/.claude/CLAUDE.md (Claude Code) or
+                               ~/.codex/AGENTS.md (Codex).
 """
 
 /// `instructions`: the workflow for AI agents, in Markdown.
@@ -126,3 +131,112 @@ These instructions ship with touchid-ssh-agent \(version) and describe this vers
 - Status also lists `stale_grants[]`; cleanup lists `removed[]` and `skipped[]`, each with
   `grant_id` (and a `reason` when skipped).
 """
+
+/// The short block a user puts in their agent's instructions file
+/// (CLAUDE.md, AGENTS.md...) so the agent discovers temporary access. Kept
+/// identical to the block in docs/ai-agents.md (the tests compare them).
+let aiSnippet = """
+## SSH access to servers (touchid-ssh-agent)
+
+To run commands on a server over SSH, use temporary access from touchid-ssh-agent.
+Run `touchid-ssh-agent instructions` once and follow that workflow: check
+`touchid-ssh-agent access status --json` first; when needed, request
+`touchid-ssh-agent access HOST[,HOST...] --for DURATION --json` with the fewest
+servers and the shortest time that fit the task, and wait while the user approves
+with Touch ID. Then use exactly the returned per-target `ssh_argv`, with its `-F`
+config and dated alias. Never bypass a denial or expiry, retry the prompt in a
+loop, fall back to other keys, or stop a grant you did not request.
+"""
+
+/// `instructions [--snippet | --add-to FILE]`.
+func instructions(_ arguments: ArraySlice<String>) throws {
+    let usage = "usage: \(tool) instructions [--snippet | --add-to FILE]"
+    switch Array(arguments) {
+    case []:
+        print(aiInstructions)
+    case ["--snippet"]:
+        print(aiSnippet)
+    case let args where args.count == 2 && args[0] == "--add-to":
+        try addAgentInstructions(to: args[1])
+    default:
+        throw UsageError(description: usage)
+    }
+}
+
+/// The block between markers in an agent's instructions file, so a later run
+/// updates it in place instead of adding a second copy.
+enum AgentInstructionsFile {
+    static let begin = "<!-- touchid-ssh-agent: begin (managed by `touchid-ssh-agent instructions --add-to`) -->"
+    static let end = "<!-- touchid-ssh-agent: end -->"
+    static let beginPrefix = "<!-- touchid-ssh-agent: begin"
+
+    static var block: String { begin + "\n" + aiSnippet + "\n" + end + "\n" }
+
+    /// The new file contents, or nil when a begin marker has no end marker.
+    static func updated(_ existing: String) -> (text: String, replacing: Bool)? {
+        let lines = existing.components(separatedBy: "\n")
+        if let start = lines.firstIndex(where: { $0.hasPrefix(beginPrefix) }) {
+            guard let stop = lines[start...].firstIndex(where: { $0 == end }) else { return nil }
+            let before = lines[..<start].joined(separator: "\n")
+            let after = lines[(stop + 1)...].joined(separator: "\n")
+            let head = before.isEmpty ? "" : before + "\n"
+            // Everything around the block is kept byte for byte.
+            return (head + block + after, true)
+        }
+        var text = existing
+        if !text.isEmpty, !text.hasSuffix("\n") { text += "\n" }
+        if !text.isEmpty { text += "\n" }
+        return (text + block, false)
+    }
+}
+
+/// Shows the block and, once the user confirms, adds it to `path` (or updates
+/// the copy an earlier run added). Symlinks are followed, so a linked file
+/// stays a link.
+func addAgentInstructions(to path: String) throws {
+    let file = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL.resolvingSymlinksInPath()
+    let shown = AgentPaths.fromEnvironment().displayPath(file)
+    guard Terminal.isInteractive else {
+        throw UsageError(description: """
+        `\(tool) instructions --add-to` changes \(shown) only after you confirm in a terminal.
+        To add the block yourself, run `\(tool) instructions --snippet` and paste it there.
+        """)
+    }
+    var isDirectory: ObjCBool = false
+    let exists = FileManager.default.fileExists(atPath: file.path, isDirectory: &isDirectory)
+    guard !isDirectory.boolValue else { throw UsageError(description: "\(shown) is a folder; name the file, for example \(shown)/CLAUDE.md") }
+    var existing = ""
+    if exists {
+        guard let data = FileManager.default.contents(atPath: file.path), let text = String(data: data, encoding: .utf8) else {
+            throw UsageError(description: "cannot read \(shown) as text; nothing was changed.")
+        }
+        existing = text
+    }
+    guard let (text, replacing) = AgentInstructionsFile.updated(existing) else {
+        throw UsageError(description: """
+        \(shown) has a touchid-ssh-agent begin marker without its end marker. Fix or remove that block by hand;
+        nothing was changed.
+        """)
+    }
+    guard text != existing else {
+        Out.say("\(shown) already has the current touchid-ssh-agent block. Nothing to change.")
+        return
+    }
+    Out.say(replacing
+        ? "The touchid-ssh-agent block in \(shown) will be replaced by the current one:"
+        : (exists ? "This block will be added at the end of \(shown):" : "\(shown) will be created with this block:"))
+    Out.say("\n" + aiSnippet.split(separator: "\n", omittingEmptySubsequences: false).map { "    " + $0 }.joined(separator: "\n"))
+    guard Terminal.ask("Write it? [y/N]: ")?.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("y") == true else {
+        Out.say("Nothing was changed. `\(tool) instructions --snippet` prints the block to paste yourself.")
+        return
+    }
+    try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let mode = ((try? FileManager.default.attributesOfItem(atPath: file.path))?[.posixPermissions] as? Int).map { mode_t($0) } ?? 0o644
+    try SecureFile.writeAtomically(Data(text.utf8), to: file, mode: mode)
+    Out.say("""
+    ✓ \(replacing ? "Updated" : "Added") the block in \(shown).
+    Agents that read this file will find temporary access. They can request it, but every
+    grant still needs your Touch ID, and servers must be enrolled first with
+    `\(tool) authorize HOST --temporary-access`.
+    """)
+}
