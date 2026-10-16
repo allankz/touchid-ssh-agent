@@ -12,13 +12,15 @@ test:
 	swift build
 	swift run -q touchid-ssh-agent-selftest
 
-# Adds a real SSH login against a throwaway sshd container. Needs Docker.
+# Adds real SSH logins, temporary access and recovery against throwaway sshd
+# containers. Needs Docker.
 test-docker:
 	swift build
 	swift run -q touchid-ssh-agent-selftest --docker
 
-# Interactive: asks you to approve one Touch ID prompt and refuse another,
-# with the agent running under launchd like the installed one.
+# Interactive: asks you to approve, refuse and ignore real Touch ID prompts,
+# with the agent under launchd like the installed one; then, with Docker, the
+# same for temporary-access issuance through a per-grant launchd job.
 test-touchid: build
 	scripts/manual-touchid-test.sh .build/release/$(BINARY)
 

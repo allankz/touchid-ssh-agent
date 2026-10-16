@@ -64,7 +64,10 @@ Temporary access
                     Stops the active grant and removes its local generated files.
   access cleanup [--json]
                     Removes stale generated files; keeps live, valid grants.
-  instructions      Prints the workflow for AI agents.
+  access help       Enrollment, inventory, aliases, cleanup and limits in detail.
+  instructions [--snippet | --add-to FILE]
+                    Prints the workflow for AI agents. --snippet prints a short block
+                    for CLAUDE.md or AGENTS.md; --add-to writes it there after asking.
 ```
 
 `access help` and `access --help` show detailed examples, one-time `authorize --temporary-access` enrollment, inventory records, generated alias/config paths, cleanup behavior and expiry limitations. Main help also points AI agents to `instructions`.
@@ -73,7 +76,7 @@ Temporary access
 
 The installed CLI provides **`touchid-ssh-agent instructions`**, returning concise Markdown with the workflow, examples and boundaries. Main help points to it. Instructions ship in the executable, requiring no repository checkout, account, MCP service or agent-specific plugin.
 
-Maintain the same guidance in [AI agent instructions](ai-agents.md), including a short block users can place in `AGENTS.md`, `CLAUDE.md` or equivalent instructions. Those files help discovery; installed CLI instructions describe the available version.
+Maintain the same guidance in [AI agent instructions](ai-agents.md), including a short block users can place in `AGENTS.md`, `CLAUDE.md` or equivalent instructions. The CLI prints that block with `instructions --snippet` and adds it to a file, after asking, with `instructions --add-to FILE`. Those files help discovery; installed CLI instructions describe the available version.
 
 The AI workflow is:
 
@@ -85,26 +88,34 @@ The AI workflow is:
 
 `access ... --json`, `access status --json`, `access stop --json` and `access cleanup --json` each write **one JSON document to stdout**. Progress and the human approval summary go to stderr. No ANSI styling or partial JSON on stdout. Every response has `schema_version`, `ok` and `status`; errors add stable `error.code` and actionable `error.message` and exit nonzero. An inactive status query is a successful query. Active results include a grant ID, UTC expiry, remaining seconds, canonical targets, permissions, absolute generated config path and per-target SSH argv. Cleanup reports removed and skipped grant IDs, with a reason for each skip. Return argv arrays instead of shell strings.
 
-Illustrative success response (real paths are absolute):
+Success response (keys sorted as printed; real paths are absolute; `access status --json` also lists `stale_grants`):
 
 ```json
 {
-  "schema_version": 1,
-  "ok": true,
-  "status": "active",
-  "grant_id": "20261015-a1b2c3d4e5f6",
-  "expires_at": "2026-10-16T00:00:00Z",
-  "remaining_seconds": 7200,
-  "permissions": {"force_command": null, "pty": false, "forwarding": false},
-  "ssh_config_path": "/example/home/.touchid-ssh-agent/access/grants/20261015-a1b2c3d4e5f6/ssh_config",
-  "targets": [
+  "expires_at" : "2026-10-16T00:00:00Z",
+  "expires_at_local" : "2026-10-15 21:00:00 -0300 (America/Sao_Paulo)",
+  "grant_id" : "20261015-a1b2c3d4e5f6",
+  "issued_at" : "2026-10-15T22:00:00Z",
+  "ok" : true,
+  "permissions" : {
+    "force_command" : null,
+    "forwarding" : false,
+    "pty" : false
+  },
+  "remaining_seconds" : 7200,
+  "schema_version" : 1,
+  "serial" : 17,
+  "ssh_config_path" : "/example/home/.touchid-ssh-agent/access/grants/20261015-a1b2c3d4e5f6/ssh_config",
+  "status" : "active",
+  "targets" : [
     {
-      "requested": "app-server",
-      "hostname": "server.example",
-      "user": "agent",
-      "port": 22,
-      "ssh_alias": "app-server-access-20261015-a1b2c3d4e5f6",
-      "ssh_argv": ["ssh", "-F", "/example/home/.touchid-ssh-agent/access/grants/20261015-a1b2c3d4e5f6/ssh_config", "app-server-access-20261015-a1b2c3d4e5f6"]
+      "hostname" : "server.example",
+      "inventory_alias" : "app-server",
+      "port" : 22,
+      "requested" : "app-server",
+      "ssh_alias" : "app-server-access-20261015-a1b2c3d4e5f6",
+      "ssh_argv" : ["ssh", "-F", "/example/home/.touchid-ssh-agent/access/grants/20261015-a1b2c3d4e5f6/ssh_config", "app-server-access-20261015-a1b2c3d4e5f6"],
+      "user" : "agent"
     }
   ]
 }
@@ -120,12 +131,14 @@ A **CA** lives in the Secure Enclave, protected by Touch ID like the login key. 
 person or AI: access app-server,worker-server --for 2h
        │ resolve targets; display accounts, permissions and expiry
        ▼
-one-shot launchd job local.touchid-ssh-agent.access
+one-shot launchd job local.touchid-ssh-agent.access.<dir-hash>.<grant-id>
        │ generates an Ed25519 key in its own memory
        │ builds the certificate from the frozen, validated request
        │ CA signs → one Touch ID
-       │ publishes a unique access/grants/<grant-id>/ directory:
-       │ agent.sock, key.pub, key-cert.pub, ssh_config and ownership manifest
+       │ publishes, in its access/grants/<grant-id>/ directory:
+       │ agent.sock, key.pub, key-cert.pub, ssh_config and known_hosts
+       ▼
+CLI: authentication-only ssh -N check on every target → confirm (or withdraw)
        ▼
 AI: ssh -F <returned-config> app-server-access-<date>-<id> <command>
        │ repeated signatures use the temporary key without Touch ID
@@ -151,7 +164,7 @@ deadline or access stop
 
 ## One-time enrollment and server-enforced scope
 
-Reuse the existing setup flow with a proposed opt-in:
+Reuse the existing setup flow with an opt-in:
 
 ```bash
 touchid-ssh-agent authorize agent@server.example --temporary-access
@@ -159,7 +172,7 @@ touchid-ssh-agent authorize agent@server.example --temporary-access
 
 This adds CA trust to the existing login/emergency-key setup and records it in inventory. On an existing target, add missing trust without duplicating keys. Normal `authorize` behavior stays compatible. A grant request never silently modifies a server.
 
-The existing `AuthorizedKey` representation has no options field, and `RemoteKeys.installScript`/`checkScript` detect presence by public-key blob alone. They cannot be reused unchanged for scoped CA trust: preserve and validate `cert-authority`, the exact principal and restrictions, including duplicate or broader trust lines. Detect unsupported server authentication policies during enrollment/readiness and return an actionable failure.
+`AuthorizedKey` gained an options field for this line. `RemoteKeys.installScript` still detects presence by public-key blob alone, so enrollment and `audit` read `authorized_keys` back and validate `cert-authority`, the exact principal and restrictions, including duplicate or broader trust lines; existing lines are never edited. Unsupported server authentication policies are detected by a real certificate login during enrollment and readiness, and reported with an actionable failure.
 
 Each enrolled server/account receives a stable, unique, opaque target ID and matching principal, such as `access-<target-id>`. Record the resolved hostname, account, port, trusted host keys, principal and CA fingerprint. New inventory fields remain optional for compatibility.
 
@@ -207,37 +220,62 @@ The first version leaves `~/.ssh/config` intact. Store each grant in its own pri
 
 ```text
 ~/.touchid-ssh-agent/access/grants/20261015-a1b2c3d4e5f6/
-  agent.sock
-  key.pub
-  key-cert.pub
-  ssh_config
-  manifest.json
+  manifest.json      ownership: grant, data directory, aliases, job identity
+  request.json       the frozen request (its SHA-256 is passed to the job)
+  job.plist          launchd job definition
+  control.sock       CLI ↔ job control channel
+  agent.sock         the temporary agent
+  key.pub            temporary public key
+  key-cert.pub       certificate
+  ssh_config         generated config
+  known_hosts        host keys pinned from the inventory
 ```
 
 The manifest identifies the grant, target-to-alias mapping, expected generated files, process identity, issue time and expiry. Validate Unix socket path length before approval. The private key remains only in memory.
+
+Each target's block (real paths are absolute, quoted when they hold spaces):
 
 ```sshconfig
 Host app-server-access-20261015-a1b2c3d4e5f6
   HostName server.example
   User agent
   Port 22
-  IdentityAgent ~/.touchid-ssh-agent/access/grants/20261015-a1b2c3d4e5f6/agent.sock
-  IdentityFile ~/.touchid-ssh-agent/access/grants/20261015-a1b2c3d4e5f6/key.pub
-  CertificateFile ~/.touchid-ssh-agent/access/grants/20261015-a1b2c3d4e5f6/key-cert.pub
+  HostKeyAlias app-server-access-20261015-a1b2c3d4e5f6
+  UserKnownHostsFile /…/access/grants/20261015-a1b2c3d4e5f6/known_hosts
+  GlobalKnownHostsFile /dev/null
+  StrictHostKeyChecking yes
+  UpdateHostKeys no
+  CheckHostIP no
+  IdentityAgent /…/access/grants/20261015-a1b2c3d4e5f6/agent.sock
+  IdentityFile /…/access/grants/20261015-a1b2c3d4e5f6/key.pub
+  CertificateFile /…/access/grants/20261015-a1b2c3d4e5f6/key-cert.pub
   IdentitiesOnly yes
   PreferredAuthentications publickey
+  PubkeyAuthentication yes
+  PasswordAuthentication no
+  KbdInteractiveAuthentication no
+  HostbasedAuthentication no
   BatchMode yes
   ForwardAgent no
+  ForwardX11 no
+  ClearAllForwardings yes
+  PermitLocalCommand no
   ControlMaster no
   ControlPath none
   ControlPersist no
+  ProxyCommand none
+  ProxyJump none
+  RequestTTY no
+  ConnectTimeout 15
 ```
+
+`RequestTTY no` is left out when the grant allows a PTY. After the target blocks, a `Host * !<alias>…` block gives every other name `ProxyCommand /usr/bin/false`, `IdentityAgent none` and no authentication methods, so a mistyped name fails without a network connection or credentials.
 
 The returned command is `ssh -F <absolute-config-path> app-server-access-20261015-a1b2c3d4e5f6`, with a remote command appended as needed. The alias selects the target, temporary key and certificate together; it is not itself a private key. The AI receives the full argv rather than having to construct it. Setting only `SSH_AUTH_SOCK` is insufficient: an existing `IdentityAgent` overrides it.
 
 Keep `-F` in every returned command. After cleanup, an old command points to a missing file and fails; it must not fall through to the personal config, DNS resolution of a generated alias or another identity. A future opt-in single managed `Include` could enable plain `ssh ALIAS`, but requires separate tests for inherited `Host *` identities, scope and expired-alias behavior. It is not required for the initial AI workflow.
 
-Resolve required transport settings, including jump hosts, without importing additional authentication identities. Reject unsupported configurations before approval. A jump host requiring temporary authentication must also be selected and enrolled. Verify effective configuration with `ssh -G` and actual certificate authentication with `ssh -v`.
+Resolve required transport settings without importing additional authentication identities, and reject unsupported configurations before approval. This version rejects jump hosts and proxy commands; a later version could support a jump host that is itself selected and enrolled. Verify effective configuration with `ssh -G` and actual certificate authentication with `ssh -v`.
 
 Readiness checks authenticate without opening a shell, command or subsystem (for example, an observed `ssh -N -T` connection closed after authentication). Checking a grant with `--force-command` must never execute its task as a side effect.
 
@@ -286,10 +324,10 @@ Use `ssh-keygen -Lf` to check fields and real `sshd` logins to establish signatu
 - Local logs record issuance, expiry/stop, serial, key ID and each signing request's time and requester chain. No payloads, hosts or remote account names. Signing logs do not prove completed logins or record every remote command.
 - Server VERBOSE logs identify the certificate key ID, serial and CA fingerprint.
 - `audit` checks CA trust/principal scope as well as login/emergency keys. `deauthorize` removes recorded CA trust too.
-- `recover` must replace the old Mac's CA trust as well as its login key, following the per-target sequence below. Old temporary grants and aliases are never restored from backup.
+- `recover` replaces the old Mac's CA trust as well as its login key, following the per-target sequence below. Old temporary grants and aliases are never restored from backup.
 - Removing a CA trust line blocks new authentication through that line; other trust paths may still accept it. Existing connections continue. Administrative KRL revocation can reject a specific serial on new authentication.
-- Fingerprint changes may invalidate the CA. Replace it explicitly using working login/emergency access and track targets still trusting its previous identity.
-- On release, update README, SECURITY.md and CONTRIBUTING.md to distinguish main-key/CA guarantees from the explicitly approved temporary software key.
+- Fingerprint changes may invalidate the CA (`ca_unusable`). Replace it explicitly: move `ca.se` and `ca.pub` aside, then `authorize HOST --temporary-access` creates a new CA and, on each enrolled server, installs and verifies it before removing the previous one by its recorded key.
+- README, SECURITY.md and CONTRIBUTING.md distinguish the login-key and CA guarantees from the explicitly approved temporary software key.
 
 ### Required recovery sequence for CA trust
 
@@ -305,7 +343,7 @@ This is part of Phase 2 acceptance, not an optional cleanup after recovery. `rec
 Failure and retry rules:
 
 - If replacement authentication cannot be verified, retain old trust on that target and report it as pending. If deletion or its verification fails, keep both identities in migration progress and report recovery as incomplete. Do not report that every host revoked the old CA when a host was unreachable or could not be checked.
-- The current code skips a target on retry when its login and emergency fingerprints already match this Mac. Extend that condition to require successful new-CA verification **and** confirmed old-CA removal. A target with only its login migrated must resume its pending CA steps.
+- A target is skipped on retry only when its login and emergency fingerprints already match this Mac **and** its new-CA verification and old-CA removal are recorded as complete. A target with only its login migrated resumes its pending CA steps (through the new Touch ID key when the old emergency key is gone).
 - A retry must preserve valid access and finish pending removal without duplicating trust lines. Missing metadata or uncertain ownership must not lead to guessing and deleting unrelated CAs.
 - `recovery test` remains read-only: check the emergency login and report whether recorded CA trust/principal/restrictions are present. It must not create/rotate CAs, issue a new grant or remove trust.
 - Update the emergency kit's manual instructions to identify the old CA using the decrypted inventory and explain its removal, alongside the lost login key. Do not require possession of the old CA private key.
@@ -344,7 +382,7 @@ Required cases:
 
 The 2026-10-15 review used an OpenSSH 10.2p1 client and two disposable OpenSSH 10.0p2 servers. Tests confirmed P-256 CA/Ed25519 certificate interoperability, shared-principal access across servers, target-specific principal rejection, forced commands, expiry rejection of fresh authentication, and continued work on existing/master connections. These software test CA keys do **not** establish real Secure Enclave CA issuance or locked-screen operation of the future job.
 
-A subsequent probe uses an actual Secure Enclave P-256 CA, the production SSH codec/agent protocol, a memory-only Ed25519 key and three disposable servers. It verifies the transition from two authorized keys to scoped CA trust and repeated certificate authentication. Its CA deliberately has no biometric requirement; it does not validate the real Touch ID dialog or future job lifecycle. See the [validation report](phase-2-validation.md) for the exact coverage.
+A subsequent probe uses an actual Secure Enclave P-256 CA, the production SSH codec/agent protocol, a memory-only Ed25519 key and three disposable servers. It verifies the transition from two authorized keys to scoped CA trust and repeated certificate authentication. Its CA deliberately has no biometric requirement; it does not validate the real Touch ID dialog or the job lifecycle. See the [validation report](phase-2-validation.md) for the exact coverage. The implemented feature, including real Touch ID issuance under launchd, is validated as described in the [implementation record](phase-2-implementation.md).
 
 ## Implementation notes
 
@@ -357,6 +395,8 @@ Details settled by the implementation:
 - **Grant files.** `access/grants/<grant-id>/` holds `manifest.json`, `request.json`, `job.plist` (launchd only), `control.sock`, `agent.sock`, `key.pub`, `key-cert.pub`, `ssh_config` and `known_hosts`. The control socket carries newline-delimited JSON between the CLI and the job (attach, issued, confirm, status, stop). The data directory must be short enough for these socket paths (104 bytes); `access` checks before approval.
 - **launchd.** Each grant has its own label, `local.touchid-ssh-agent.access.<data-directory hash>.<grant-id>`, with `RunAtLoad`, `LaunchOnlyOnce`, no `KeepAlive`, `ProcessType Interactive`. The job never unloads itself (launchd would signal it mid-teardown); `access stop`, `access cleanup` and the next request unload finished jobs. The automated tests start the job as a detached process instead (`TOUCHID_SSH_AGENT_ACCESS_LAUNCH=process`), except one launchd test.
 - **Readiness** runs `ssh -F <grant config> -v -N -T <alias>` for every target in parallel and requires both `Server accepts key: … ED25519-CERT <temporary key fingerprint>` and `Authenticated to`, then closes the connection.
+- **Agent instructions.** Besides `instructions`, the CLI ships the short discovery block (`instructions --snippet`) and can add it to an agent's instructions file between markers, after asking (`instructions --add-to FILE`); a test keeps it identical to the block in the [AI guide](ai-agents.md).
+- **Versions.** The feature ships in 0.2.0.
 - **What the temporary agent signs.** Only `SSH_MSG_USERAUTH_REQUEST` payloads (`publickey` or `publickey-hostbound`) that offer the grant's key or certificate, for one of the selected accounts. Git signatures and arbitrary data are refused.
 - **Deadline.** The job keeps a monotonic deadline (`CLOCK_MONOTONIC`, which keeps counting during sleep) next to the wall-clock one and refuses to sign when either passed; a 2-second wall-clock timer and IOKit wake notifications trigger teardown.
 - **JSON.** `status` is `active`, `inactive`, `pending`, `stopped`, `cleaned` or `error`. Error codes: `invalid_arguments` and `invalid_duration` (exit 2); `unknown_target`, `not_enrolled`, `ambiguous_target`, `ca_mismatch`, `rotation_pending`, `host_key_missing`, `unsupported_configuration`, `socket_path_too_long`, `access_already_active`, `access_busy`, `approval_denied`, `approval_timeout`, `approval_unavailable`, `ca_unusable`, `cancelled`, `stopped`, `readiness_failed`, `job_failed`, `stop_failed`, `internal_error` (exit 1).

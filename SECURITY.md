@@ -28,32 +28,31 @@ This is a personal project maintained on a best-effort basis. The goals are to a
 - **Copying the private key.** The login key and the temporary-access CA are generated inside the Secure Enclave and never leave it. The files on disk are blobs that only this Mac's Secure Enclave can use.
 - **Using the key without the owner present.** Every login-key signature and every certificate the CA issues requires Touch ID. There is no reuse window, no silent mode and no password fallback. Temporary access is the one explicit exception, described next.
 - **Temporary access beyond what was approved.** One Touch ID issues one certificate, for the servers and permissions shown, until a deadline of at most 12 hours. Each enrolled server account trusts the CA only for its own principal, so the certificate cannot log in elsewhere; the servers enforce its expiry themselves. The grant's private key exists only in its job's memory, is never written to disk, and is never renewed: a crash, logout or reboot ends the grant.
-- **Silent use by local software**, including AI agents. Any process of the user can *request* a signature, but only a fingerprint can *approve* it.
-- **Other local users.** The socket is `0600` inside a `0700` directory, and the agent rejects peers whose UID differs from its own.
-- **Moving the key to another Mac.** The blob is bound to this device and `WhenUnlockedThisDeviceOnly`.
+- **Silent use by local software**, including AI agents. Any process of the user can *request* a login-key signature or a grant, but only a fingerprint can *approve* it.
+- **Other local users.** The agent's socket and every grant's socket are `0600` inside `0700` directories, and both agents reject peers whose UID differs from their own.
+- **Moving the key to another Mac.** The login key and CA blobs are bound to this device and `WhenUnlockedThisDeviceOnly`.
 - **Being locked out when the Mac is gone.** The emergency kit and the encrypted inventory backup let you find and reach your servers from any computer.
 - **Reading the server list from the cloud.** `inventory.age` is encrypted with age to the emergency key; the backup folder's README names no server.
 
 ### What it does not protect against
 
-Temporary access deliberately trades per-signature Touch ID for unattended work, within the approved scope and deadline:
+- **An attacker who controls your user session and gets you to approve.** The prompt describes each request as well as the protocol allows, but you still have to read it.
+- **root or kernel compromise** of the Mac.
+- **Compromised servers**, or agent forwarding to them. Keep `ForwardAgent` off.
+- **Destination checks without `publickey-hostbound`.** For older servers the agent cannot know where a signature will be used. The process chain shown in the prompt is informational and can be stale.
+- **Loss of availability.** The Touch ID key is gone if the Mac fails, if fingerprints change under the `current-set` policy, or after `deauthorize --all` deletes it. The emergency kit covers this only if it was stored outside the Mac. The CA always uses `current-set`: changing fingerprints stops temporary access until a new CA is enrolled (README, "If the CA stops working").
+- **Theft of the emergency kit together with its passphrase.** The emergency key is a regular software key: whoever has the kit and the passphrase can log in to every server that trusts it, without Touch ID. Its protection is the passphrase (about 119 bits when generated, bcrypt KDF with 200 rounds) and keeping the kit off the Mac, ideally apart from the passphrase.
+- **A man in the middle during recovery** for servers whose host key was never recorded (entries recorded before host keys were stored, until their next `audit`).
+- **Reading the local inventory on a stolen Mac.** `inventory.json` is plain JSON (mode `0600`) so the agent can use it without a passphrase; it lists servers, accounts and CA trust records, no secrets. FileVault protects it at rest; `status` warns when FileVault is off.
+
+Temporary access deliberately trades per-signature Touch ID for unattended work, within the approved scope and deadline. It does not protect against:
 
 - **Other processes of your user during an active grant.** Any process running as you can use the grant's socket until it ends, as it could use any SSH key file you can read. The requesting process chain in the log is informational, not a boundary.
 - **Extraction of the grant's key.** It is a software Ed25519 key in the grant job's memory. Malware running as you (or as root) could copy it; a copy works until the certificate expires or the server's CA line is removed. Stopping the grant cannot destroy a copy.
 - **Ending what already started.** Expiry, `access stop` and removing CA trust block new authentication only. Open sessions, running commands and changes already made continue. A grant is not a sandbox: the selected account's permissions apply, and an unrestricted shell can install other persistent access.
 - **Trust configured outside `authorized_keys`.** `audit`, `deauthorize` and `recover` manage the CA line this tool installs in `~/.ssh/authorized_keys`. A server that also trusts the CA elsewhere (for example `TrustedUserCAKeys`) is not checked.
 - **Badly wrong server clocks.** Certificates start five minutes early to absorb small differences; a server clock far off can reject a valid certificate or accept one after its deadline.
-- **Sleep you did not choose.** A grant prevents idle sleep only; closing the lid, a forced sleep or a power loss stop it.
-
-
-- **An attacker who controls your user session and gets you to approve.** The prompt describes each request as well as the protocol allows, but you still have to read it.
-- **root or kernel compromise** of the Mac.
-- **Compromised servers**, or agent forwarding to them. Keep `ForwardAgent` off.
-- **Destination checks without `publickey-hostbound`.** For older servers the agent cannot know where a signature will be used. The process chain shown in the prompt is informational and can be stale.
-- **Loss of availability.** The Touch ID key is gone if the Mac fails, if fingerprints change under the `current-set` policy, or after `deauthorize --all` deletes it. The emergency kit covers this only if it was stored outside the Mac.
-- **Theft of the emergency kit together with its passphrase.** The emergency key is a regular software key: whoever has the kit and the passphrase can log in to every server that trusts it, without Touch ID. Its protection is the passphrase (about 119 bits when generated, bcrypt KDF with 200 rounds) and keeping the kit off the Mac, ideally apart from the passphrase.
-- **A man in the middle during recovery** for servers whose host key was never recorded (entries recorded before host keys were stored, until their next `audit`).
-- **Reading the local inventory on a stolen Mac.** `inventory.json` is plain JSON (mode `0600`) so the agent can use it without a passphrase. FileVault protects it at rest; `status` warns when FileVault is off.
+- **Sleep you did not choose.** A grant prevents idle sleep only; closing the lid, a forced sleep or a power loss still interrupt it, and its deadline keeps counting meanwhile.
 
 ## Security design
 
@@ -61,21 +60,21 @@ Temporary access deliberately trades per-signature Touch ID for unattended work,
 - **Authorization**: a fresh `LAContext` for every signature, reuse duration 0, prompt cancelled after 60 s. Sign requests are serialized, so only one prompt is shown at a time. The temporary-access CA uses the same signer, with its own context per certificate.
 - **Small protocol surface**: only `SSH_AGENTC_REQUEST_IDENTITIES` and `SSH_AGENTC_SIGN_REQUEST` are implemented. Everything else (add, remove, lock, extensions) gets `SSH_AGENT_FAILURE`. Messages are capped at 256 KiB, parsed strictly with bounds checks, and malformed input closes the connection.
 - **Socket hygiene**: the agent refuses to replace a file that is not a socket or a socket another agent is serving, and removes its socket on exit.
-- **Output checks**: every signature is verified against the public key before it is returned.
+- **Output checks**: every signature is verified against the public key before it is returned, and every certificate against the CA's public key before it is used.
 - **Untrusted text**: user names, namespaces, host names and process names are stripped of control characters and truncated before they reach the prompt or the log.
 - **Logs**: time, event, process chain and outcome only. No key material, payloads, remote user names or hosts. Grant events go to `access.log` with the grant ID, certificate serial and key ID.
-- **Test-only keys**: keys without Touch ID can only be created through `@_spi(Testing)` API, which refuses the default directory and is not reachable from the CLI.
+- **Test-only keys**: keys and CAs without Touch ID can only be created through `@_spi(Testing)` API, which refuses the default directory and is not reachable from the CLI. The test-only `TOUCHID_SSH_AGENT_ACCESS_LAUNCH=process` setting only starts a grant's job as a detached process instead of under launchd; Touch ID approval and every other check stay the same.
 - **Emergency kit**: `ssh-keygen` generates the key in a new session without a controlling terminal, with the passphrase written to its stdin. The passphrase never appears on a command line or in the environment, and askpass variables are removed. The kit must open with the passphrase (`ssh-keygen -y`) before it is shown to the user. It is erased from the Mac once the user confirms it was saved, and only the public key is kept.
 - **Imports**: `recovery import` accepts only ed25519 or rsa public keys and refuses private keys.
-- **Inventory backup**: `age -R recovery.pub`, with the plaintext piped through stdin (never written to a temporary file) and the result moved into place atomically. Replacing the emergency key re-encrypts the backup for the new key.
+- **Inventory backup**: `age -R recovery.pub`, with the plaintext piped through stdin (never written to a temporary file) and the result moved into place atomically. Replacing the emergency key re-encrypts the backup for the new key. The backup carries the CA trust records and the latest grant summaries, never a private key, socket path or live grant; `recover` restores none of the grants.
 - **recover and recovery test**:
   - The emergency key is loaded into a throwaway `ssh-agent` with `ssh-add -`, with the kit arriving on stdin, so this tool never writes the key to disk. The agent is killed when the command ends.
   - age and ssh-add read the passphrase from the terminal themselves; this program never sees it.
   - Server host keys are checked against the ones recorded in the inventory. Only entries recorded before host keys were stored fall back to trust on first use, with a visible warning; the next `audit` records them.
   - Every server is checked with the emergency key before anything changes, and no server is changed until the user types `RECOVER`.
-  - On each server, this Mac's keys are added first. The old keys are removed only after the new Touch ID key has logged in, only when their fingerprint matches the lost Mac's key, or the used emergency key when the user chose to replace it, exactly, and never when they are this Mac's keys.
-  - If any server fails, its old keys stay, the cloud backup is not replaced, and the old kit keeps working for another run.
-- **deauthorize**: removes only the `authorized_keys` lines holding this Mac's Touch ID key or emergency key, matched by the exact key, keeping the file's inode and permissions. When no other key would be left, nothing is written until the user confirms, because the server would then accept only a password or console access.
+  - On each server, this Mac's keys are added first. The old keys are removed only after the new Touch ID key has logged in (and, on servers enrolled for temporary access, a certificate through this Mac's CA too), only when their fingerprint matches the lost Mac's key, or the used emergency key when the user chose to replace it, exactly, and never when they are this Mac's keys.
+  - If any server fails, its old keys stay, the cloud backup is not replaced (the final audit does not rewrite it either), and the old kit keeps working for another run.
+- **deauthorize**: removes only the `authorized_keys` lines holding this Mac's Touch ID key, emergency key or CA (and a lost Mac's CA that a recovery left pending there), matched by the exact key, keeping the file's inode and permissions. When no other key would be left, nothing is written until the user confirms, because the server would then accept only a password or console access.
 - **Temporary access**:
   - *CA*: a separate Secure Enclave key (`ca.se`), always `biometryCurrentSet` and `WhenUnlockedThisDeviceOnly`. It signs only certificates, after Touch ID, and is never offered on any socket. Serial numbers come from a counter updated under a file lock.
   - *Enrollment*: `authorize --temporary-access` appends one line, `cert-authority,principals="access-<id>",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc`, with a stable random principal per server account. Existing lines are never edited; a line holding the CA with broader options is reported and enrollment is refused. A real certificate login is checked before the enrollment is recorded.
@@ -87,8 +86,9 @@ Temporary access deliberately trades per-signature Touch ID for unattended work,
   - *Cleanup*: only directories whose manifest names them and this data directory, holding only file names this tool creates, owned by the user and without symlinks, are removed, through descriptors opened without following links. A job is recognized by pid and start time; live grants are kept and uncertain cases are skipped with a reason.
   - *Recovery*: the lost Mac's CA is removed only by the exact key recorded in the inventory (whose fingerprint must match), only after this Mac's CA, login and certificate login were verified on that server, and progress is saved before each change so a retry finishes pending CA work.
   - *Sleep*: an idle-sleep assertion for the grant's lifetime, released when it ends; the screen may lock.
-- **ssh config edits**: only after the user confirms. New `Host` blocks are appended; when lines are added to an existing block, the previous file is saved next to it as `.touchid-backup` first.
-- **authorize and audit**: keys are appended by a small POSIX `sh` script that matches existing keys by blob, fixes a missing final newline and quotes only a restricted character set. The Touch ID check disables connection sharing (`ControlPath=none`), uses `BatchMode`, and confirms from `ssh -v` that the server accepted the Touch ID key's fingerprint, so another configured key cannot pass for it.
+- **ssh config edits**: only after the user confirms. New `Host` blocks are appended; when lines are added to an existing block, the previous file is saved next to it as `.touchid-backup` first. Grants never touch `~/.ssh/config`.
+- **Agent instruction files**: `instructions --add-to FILE` writes only after the user confirms in a terminal, only between its own markers (the rest of the file is kept byte for byte), and follows a symlinked file instead of replacing the link.
+- **authorize and audit**: keys are appended by a small POSIX `sh` script that matches existing keys by blob, fixes a missing final newline and quotes only a restricted character set. Because a blob match does not prove a CA line's options, both read `authorized_keys` back and check the CA line's scope. The Touch ID check disables connection sharing (`ControlPath=none`), uses `BatchMode`, and confirms from `ssh -v` that the server accepted the Touch ID key's fingerprint, so another configured key cannot pass for it.
 
 ## Scope
 

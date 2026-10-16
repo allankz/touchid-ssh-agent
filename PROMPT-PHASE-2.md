@@ -1,5 +1,7 @@
 # Implementation prompt: Phase 2 temporary SSH access
 
+> **Historical handoff.** This is the brief Phase 2 was built from; it shipped in version 0.2.0. Its "remains version 0.1.0" and "not implemented" statements describe the starting point. For what was built and validated, see [`docs/phase-2-implementation.md`](docs/phase-2-implementation.md).
+
 Implement Phase 2 of `touchid-ssh-agent` in this repository. Deliver the production feature, recovery integration, tests and accurate documentation described below. The user approved this direction in the planning discussion; continue implementation without another design approval or requiring a new issue. Complete the work within this scope and report evidence for each acceptance gate.
 
 All paths below are relative to the repository root. This document is the implementation handoff. The checkpoint containing it includes design documents and a disposable feasibility probe; the production CLI remains version 0.1.0 and has no temporary-access implementation yet. Its parent baseline is commit `7e95857`.

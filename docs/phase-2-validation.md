@@ -55,8 +55,8 @@ Before the Phase 2 handoff commit, `make test` passed all **37 existing tests**.
 ## Not established by this probe
 
 - Actual Touch ID approval, denial, timeout or the number of native prompts. These require a biometric CA and interactive testing.
-- Production `access`, `instructions`, JSON error handling, target parsing, inventory enrollment, audit, deauthorization or recovery integration. They remain planned commands and behaviors.
-- launchd startup, cancellation/readiness, automatic expiry teardown, screen lock, logout, sleep/wake or power-management behavior. The probe runs as a child process and deliberately keeps an expired socket available for a negative test.
+- Production `access`, `instructions`, JSON error handling, target parsing, inventory enrollment, audit, deauthorization or recovery integration. They were built afterwards; see the [implementation record](phase-2-implementation.md).
+- launchd startup, cancellation/readiness, automatic expiry teardown, screen lock, logout, sleep/wake or power-management behavior. The probe runs as a child process and deliberately keeps an expired socket available for a negative test. (The implementation covers launchd startup, cancellation, readiness, expiry teardown and the idle-sleep assertion with tests; screen lock, logout and sleep/wake are listed there as manual checks.)
 - ProxyJump or arbitrary existing SSH configurations and server authentication policies. Only explicit generated configurations and the disposable e2e server policy are tested here.
 
 The protocol and hardware signature path are testable now. Full feature acceptance still requires implementing and testing the remaining lifecycle and integration work in the [Phase 2 design](phase-2-temporary-credentials.md).

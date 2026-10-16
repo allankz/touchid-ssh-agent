@@ -56,7 +56,7 @@ Final runs on this branch (2026-10-15), with the Mac unlocked:
 | --- | --- |
 | `make build` | Passed (release build). |
 | `make test` | Passed: 56 tests (the 37 earlier tests unchanged, plus 19 new unit, Secure Enclave, in-process job and instructions tests). |
-| `make test-docker` | Passed: 95 tests, including 15 temporary-access and 4 CA-recovery Docker tests next to the earlier Docker tests. |
+| `make test-docker` | Passed: 96 tests (the 56 above plus 40 Docker tests, of which 15 cover temporary access and 4 CA recovery). |
 | `python3 -B scripts/verify-temporary-access-design.py` | Passed (the feasibility probe still works with the changed codec files and e2e image). |
 | `LAUNCH_ONLY=1 make test-touchid` | Passed: the agent runs under launchd and offers the test identity. |
 | `make test-touchid` (interactive) | Passed: 14/14 with a person at the Mac (2026-10-15). Login key: approve, deny, time out, approve again, all under launchd. Temporary access: enrollment with a real `current-set` CA (login check and validation certificate approved), issuance through the per-grant launchd job, three logins without prompts, the idle-sleep assertion held and released, the old command failing after stop, `approval_denied`, `approval_timeout`, and no grant directory or job left. |

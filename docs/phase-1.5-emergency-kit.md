@@ -42,7 +42,7 @@ The Touch ID key never leaves the Secure Enclave of one Mac. That is the point, 
 
 ### audit
 
-Logs in to each inventory server with the Touch ID key (one Touch ID each) and reports whether both keys are present. It also reports whether some `Host` in the ssh config reaches the server through the Touch ID agent. It records the result and the server's host key in the inventory.
+Logs in to each inventory server with the Touch ID key (one Touch ID each) and reports whether both keys are present (since 0.2.0, also the CA line's scope on servers enrolled for temporary access). It also reports whether some `Host` in the ssh config reaches the server through the Touch ID agent. It records the result and the server's host key in the inventory.
 
 ### ssh config
 
@@ -71,7 +71,7 @@ If every server moved, a new backup replaces the old one. When the key was repla
 
 ### deauthorize
 
-`deauthorize NAME...` or `--all` takes this Mac's keys off servers, through the user's usual ssh access (extra ssh options after `--`). A POSIX `sh` script removes the lines holding this Mac's Touch ID key or emergency key, matched by the exact key, and lists what is left. If no other key would remain, it writes nothing and reports it, and the user decides whether to go ahead. Servers that were cleaned leave the inventory, and the backup is rewritten even when the inventory becomes empty. Only this Mac's current keys can be removed: when an entry recorded other fingerprints, it says so. `--all` ends by offering to delete the Touch ID key, which replaces the old `delete` command.
+`deauthorize NAME...` or `--all` takes this Mac's keys off servers, through the user's usual ssh access (extra ssh options after `--`). A POSIX `sh` script removes the lines holding this Mac's Touch ID key or emergency key (since 0.2.0, also its temporary-access CA), matched by the exact key, and lists what is left. If no other key would remain, it writes nothing and reports it, and the user decides whether to go ahead. Servers that were cleaned leave the inventory, and the backup is rewritten even when the inventory becomes empty. Only this Mac's current keys can be removed: when an entry recorded other fingerprints, it says so. `--all` ends by offering to delete the Touch ID key, which replaces the old `delete` command.
 
 ### migrate
 
@@ -133,4 +133,4 @@ The kit carries these steps, filled in with its fingerprints and backup folder:
 
 - `recovery create --replace` does not remove the old emergency key from servers: `authorize` installs the new key and the old line must be removed by hand. (`recover` does remove the used key.)
 - The kit lists the backup folder it was created with. After `set backup-path`, note the new location next to the kit.
-- `audit` costs one Touch ID per server; `recover` costs two (the check before removing the old keys, and the final audit).
+- `audit` costs one Touch ID per server; `recover` costs two (the check before removing the old keys, and the final audit), plus one in total for the validation certificate when some servers are enrolled for temporary access.

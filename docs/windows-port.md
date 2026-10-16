@@ -9,7 +9,7 @@ Can touchid-ssh-agent run on Windows with Windows Hello in place of Touch ID, an
 ## What the Mac version promises
 
 1. **The key cannot leave the hardware.** It is generated inside the Secure Enclave.
-2. **The hardware enforces biometry on every signature.** The requirement is sealed into the key. Neither the agent nor root can sign without a finger; root can only ask.
+2. **The hardware enforces biometry on every signature.** The requirement is sealed into the key. Neither the agent nor root can sign without a finger; root can only ask. (Since 0.2.0, temporary access is a deliberate, approved exception: one Touch ID lets a short-lived software key log in for a limited time. A Windows version would decide separately whether to offer it.)
 3. **The prompt says what is being approved**: remote user, server, requesting process chain.
 4. **Any OpenSSH server works.** It only needs an `ecdsa-sha2-nistp256` line in `authorized_keys`.
 
