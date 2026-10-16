@@ -371,7 +371,13 @@ func authorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
     let report: [String: Bool]
     var listing: [String] = []
     do {
-        (report, listing) = try RemoteKeys.installAndList(keys, on: target)
+        // Without --temporary-access, exactly the 0.1.0 script; the listing is
+        // only needed to check a CA line's scope.
+        if plan == nil {
+            report = try RemoteKeys.install(keys, on: target)
+        } else {
+            (report, listing) = try RemoteKeys.installAndList(keys, on: target)
+        }
     } catch {
         let portFlag = port.map { " -p \($0)" } ?? ""
         throw UsageError(description: """
@@ -621,7 +627,8 @@ func auditTemporaryAccess(_ enrollment: TemporaryAccessEnrollment, listing: [Str
     guard let caBlob = enrollment.caBlob else {
         return (false, "the recorded CA key does not match its fingerprint; run `\(tool) authorize HOST --temporary-access`")
     }
-    let retired = Set([enrollment.retiredCAFingerprint, enrollment.caRotation?.oldCAFingerprint].compactMap { $0 })
+    let retired = Set((enrollment.retiredCAFingerprints ?? []) + (enrollment.caRotation?.oldCAs.map(\.fingerprint) ?? []))
+        .subtracting([enrollment.caFingerprint])
     let report = CATrust.inspect(listing, caBlob: caBlob, principal: enrollment.principal, retiredFingerprints: retired)
     var text = report.summary + " (principal \(enrollment.principal))"
     var ok = report.isScoped && report.retiredLines == 0

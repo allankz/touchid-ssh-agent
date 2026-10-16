@@ -265,9 +265,10 @@ public enum EmergencyKitBuilder {
            (fingerprint above) from ~/.ssh/authorized_keys. To see each
            line's fingerprint: ssh-keygen -lf ~/.ssh/authorized_keys
            If the inventory shows "temporaryAccess" for a server, also
-           remove the line starting with cert-authority whose fingerprint
-           is that entry's "caFingerprint": it is the lost Mac's CA. Its
-           private key is not needed to remove it.
+           remove the lines starting with cert-authority whose fingerprint
+           is that entry's "caFingerprint", or one named in its
+           "caRotation": they are the lost Mac's CAs. Their private keys
+           are not needed to remove them.
         5. On your new Mac run `touchid-ssh-agent setup`, which creates a new
            kit, then `touchid-ssh-agent authorize` for every server.
         6. Remove this emergency key from the servers afterwards: once it has

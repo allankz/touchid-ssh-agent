@@ -28,17 +28,12 @@ struct EnrollmentPlan {
     let key: AuthorizedKey
     let previous: TemporaryAccessEnrollment?
 
-    /// A CA this server trusted before that must be removed once the current
+    /// CAs this server trusted before that must be removed once the current
     /// CA works there: a previous CA of this Mac, or a lost Mac's CA left by a
-    /// recovery that did not finish.
-    var retiring: (blob: Data, publicKey: String, fingerprint: String)? {
-        if let rotation = previous?.caRotation, rotation.oldCAFingerprint != ca.fingerprint, let blob = rotation.oldCABlob {
-            return (blob, rotation.oldCAPublicKey, rotation.oldCAFingerprint)
-        }
-        if let previous, previous.caFingerprint != ca.fingerprint, let blob = previous.caBlob {
-            return (blob, previous.caPublicKey, previous.caFingerprint)
-        }
-        return nil
+    /// recovery that did not finish. Only records whose key matches their
+    /// fingerprint, so nothing else is ever removed.
+    var retiring: [CAKey] {
+        (previous?.recordedCAs ?? []).filter { $0.fingerprint != ca.fingerprint && $0.blob != nil }
     }
 
     static func prepare(paths: AgentPaths, resolved: ResolvedTarget, existing: InventoryEntry?) throws -> EnrollmentPlan {
@@ -60,17 +55,23 @@ struct EnrollmentPlan {
     /// Before the server changes: record which old CA must go, so an
     /// interruption never loses it.
     func recordIntent(paths: AgentPaths) throws {
-        guard let retiring, let previous else { return }
-        let rotation = previous.caRotation ?? CARotation(
-            recoveryId: "authorize-\(Int(Date().timeIntervalSince1970))", oldCAPublicKey: retiring.publicKey,
-            oldCAFingerprint: retiring.fingerprint, newCAPublicKey: ca.authorizedKeyLine, newCAFingerprint: ca.fingerprint,
-            principal: principal, authorizedKeyOptions: CATrust.options(principal: principal), step: .planned,
-            updatedAt: .wholeSecondsNow)
+        guard let rotation = previous?.caRotation ?? newRotation(step: .planned) else { return }
         try InventoryStore.update(paths) { inventory in
             for index in inventory.servers.indices where inventory.servers[index].temporaryAccess?.targetId == targetId {
                 inventory.servers[index].temporaryAccess?.caRotation = rotation
             }
         }
+    }
+
+    func newRotation(step: CARotation.Step) -> CARotation? {
+        guard let first = retiring.first else { return nil }
+        var rotation = CARotation(
+            recoveryId: "authorize-\(Int(Date().timeIntervalSince1970))", oldCAPublicKey: first.publicKey,
+            oldCAFingerprint: first.fingerprint, newCAPublicKey: ca.authorizedKeyLine, newCAFingerprint: ca.fingerprint,
+            principal: principal, authorizedKeyOptions: CATrust.options(principal: principal), step: step,
+            updatedAt: .wholeSecondsNow)
+        if retiring.count > 1 { rotation.extraOldCAs = Array(retiring.dropFirst()) }
+        return rotation
     }
 
     /// After the keys were added: checks the CA line's scope, then a real
@@ -85,12 +86,8 @@ struct EnrollmentPlan {
             verified: false)
         enrollment.lastAudit = .wholeSecondsNow
         if previous?.caFingerprint == ca.fingerprint { enrollment.lastGrant = previous?.lastGrant }
-        enrollment.retiredCAFingerprint = previous?.retiredCAFingerprint
-        if var rotation = previous?.caRotation ?? (retiring.map { old in
-            CARotation(recoveryId: "authorize", oldCAPublicKey: old.publicKey, oldCAFingerprint: old.fingerprint,
-                       newCAPublicKey: ca.authorizedKeyLine, newCAFingerprint: ca.fingerprint, principal: principal,
-                       authorizedKeyOptions: enrollment.authorizedKeyOptions, step: .replacementAdded, updatedAt: .wholeSecondsNow)
-        }) {
+        enrollment.retiredCAFingerprints = previous?.retiredCAFingerprints
+        if var rotation = previous?.caRotation ?? newRotation(step: .replacementAdded) {
             rotation.step = .replacementAdded
             enrollment.caRotation = rotation
         }
@@ -133,18 +130,20 @@ struct EnrollmentPlan {
         enrollment.verified = true
         enrollment.lastAuditResult = "\(scope.summary); certificate login works"
 
-        if let retiring {
+        if !retiring.isEmpty {
+            let fingerprints = retiring.map(\.fingerprint)
+            let shown = fingerprints.joined(separator: ", ")
             enrollment.caRotation?.step = .retirementStarted
-            let removal = try? RemoteKeys.runWithUserAccess(RemoteKeys.removeScript([retiring.blob]), on: target)
+            let removal = try? RemoteKeys.runWithUserAccess(RemoteKeys.removeScript(retiring.compactMap(\.blob)), on: target)
             let remaining = RemoteKeys.listedLines(removal?.output ?? "")
-            let after = CATrust.inspect(remaining, caBlob: ca.publicKeyBlob, principal: principal, retiredFingerprints: [retiring.fingerprint])
+            let after = CATrust.inspect(remaining, caBlob: ca.publicKeyBlob, principal: principal, retiredFingerprints: Set(fingerprints))
             guard removal?.ok == true, RemoteKeys.containsListing(removal?.output ?? ""), after.retiredLines == 0, after.isScoped else {
-                enrollment.lastAuditResult = "certificate login works, but the previous CA \(retiring.fingerprint) could not be removed"
-                return (false, enrollment, lines + ["✗ The previous CA (\(retiring.fingerprint)) could not be removed; run authorize again."])
+                enrollment.lastAuditResult = "certificate login works, but the previous CA \(shown) could not be removed"
+                return (false, enrollment, lines + ["✗ The previous CA (\(shown)) could not be removed; run authorize again."])
             }
             enrollment.caRotation = nil
-            enrollment.retiredCAFingerprint = retiring.fingerprint
-            lines.append("✓ Removed the previous CA (\(retiring.fingerprint)) from authorized_keys. Other trust paths, "
+            enrollment.retiredCAFingerprints = Array(Set((enrollment.retiredCAFingerprints ?? []) + fingerprints)).sorted()
+            lines.append("✓ Removed the previous CA (\(shown)) from authorized_keys. Other trust paths, "
                 + "such as TrustedUserCAKeys in sshd_config, are not checked.")
         }
         return (true, enrollment, lines)

@@ -148,9 +148,11 @@ func deauthorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
 /// A lost Mac's CA still waiting for removal on this server (an unfinished
 /// recovery): it goes too, matched by its recorded key.
 private func pendingOldCA(_ entry: InventoryEntry?) -> [AuthorizedKey] {
-    guard let rotation = entry?.temporaryAccess?.caRotation, let blob = rotation.oldCABlob else { return [] }
-    return [AuthorizedKey(label: "old-ca", type: SSHKeyFormat.keyTypeName(ofBlob: blob) ?? SSHKeyFormat.keyType,
-                          blob: blob, comment: "old-ca")]
+    guard let rotation = entry?.temporaryAccess?.caRotation else { return [] }
+    return rotation.oldCAs.compactMap(\.blob).enumerated().map { index, blob in
+        AuthorizedKey(label: index == 0 ? "old-ca" : "old-ca-\(index + 1)",
+                      type: SSHKeyFormat.keyTypeName(ofBlob: blob) ?? SSHKeyFormat.keyType, blob: blob, comment: "old-ca")
+    }
 }
 
 private func deauthorizeTarget(for entry: InventoryEntry, configFile: String?, extra: [String]) -> DeauthorizeTarget {
@@ -190,9 +192,9 @@ private func removeKeys(_ keys: [AuthorizedKey], from item: DeauthorizeTarget) -
         Out.say("  ✗ the server did not confirm the change; check its ~/.ssh/authorized_keys")
         return nil
     }
-    let names = ["login": "the Touch ID key", "recovery": "the emergency key", CATrust.label: "the CA trust",
-                 "old-ca": "the previous CA's trust"]
-    let found = keys.filter { outcome.report[$0.label] == "found" }.compactMap { names[$0.label] }
+    let names = ["login": "the Touch ID key", "recovery": "the emergency key", CATrust.label: "the CA trust"]
+    let found = keys.filter { outcome.report[$0.label] == "found" }
+        .compactMap { names[$0.label] ?? ($0.label.hasPrefix("old-ca") ? "a previous CA's trust" : nil) }
     let others = left.isEmpty ? "no other key left" : "\(left.count) other key\(left.count == 1 ? "" : "s") left"
     let caNote = keys.contains { $0.label == CATrust.label } && outcome.report[CATrust.label] == "found"
         ? " Trust configured elsewhere (for example TrustedUserCAKeys in sshd_config) is not checked." : ""

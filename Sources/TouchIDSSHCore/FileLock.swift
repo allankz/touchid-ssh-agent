@@ -37,19 +37,18 @@ public enum FileLock {
             close(fd)
             throw FileLockError.cannotOpen(url.path, "not a regular file owned by this user")
         }
-        guard let timeout else {
-            while flock(fd, LOCK_EX) != 0 {
-                guard errno == EINTR else {
-                    let reason = String(cString: strerror(errno))
-                    close(fd)
-                    throw FileLockError.cannotOpen(url.path, reason)
-                }
+        let deadline = timeout.map { Date().addingTimeInterval($0) }
+        while flock(fd, timeout == nil ? LOCK_EX : LOCK_EX | LOCK_NB) != 0 {
+            let code = errno
+            if code == EINTR { continue }
+            // A file system without flock (some network volumes): carry on
+            // unlocked, as versions before the lock did.
+            if code == ENOTSUP || code == EOPNOTSUPP { return fd }
+            guard code == EWOULDBLOCK, let deadline else {
+                close(fd)
+                throw FileLockError.cannotOpen(url.path, String(cString: strerror(code)))
             }
-            return fd
-        }
-        let deadline = Date().addingTimeInterval(timeout)
-        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
-            guard errno == EWOULDBLOCK || errno == EINTR, Date() < deadline else {
+            guard Date() < deadline else {
                 close(fd)
                 throw FileLockError.timedOut(url.path)
             }

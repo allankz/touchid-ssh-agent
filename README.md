@@ -164,16 +164,18 @@ make install                                   # also installs age
 touchid-ssh-agent recover ~/emergency-kit.txt
 ```
 
+Run `recover` before you `authorize` any server on the new Mac: once that Mac's own inventory lists a server, the next backup it writes replaces the old Mac's `inventory.age` in a shared backup folder.
+
 `recover` does the rest, in this order:
 
 1. **Opens the kit.** It asks for the kit's passphrase twice, one right after the other, for security: age opens the inventory and ssh-add loads the emergency key. It finds `inventory.age` from the folder named in the kit, or asks where it is. The passphrase is not asked again after that.
 2. **Checks everything, changing nothing on the servers.** It creates this Mac's Touch ID key if needed (and its temporary-access CA, when some server trusts the lost Mac's CA), starts the agent, and logs in to every server with the emergency key.
 3. **Asks whether to replace the emergency key.** Replace it if anyone else may have seen the kit or its passphrase: you save a new kit with a new passphrase, and the old key is removed from every server. Keep it, and nothing new is created: the kit you used stays your emergency kit.
 4. **Moves the servers**, after you type `RECOVER`. For each server, it logs in with the emergency key and adds this Mac's keys, checking the server's host key against the one in the inventory. Then it checks the Touch ID login (one Touch ID), and only then removes the lost Mac's key (and the old emergency key, if you replaced it). The keys it removes are matched by their exact fingerprints, so nothing else in `authorized_keys` is touched.
-   On servers enrolled for temporary access, it also adds this Mac's CA with the same principal and restrictions, and checks a real certificate login through it with a short-lived validation certificate (one Touch ID for all of them; the certificate grants nothing and is never saved). Only then is the lost Mac's CA removed, by the exact key the inventory recorded. `--keep-emergency-key` never keeps the lost Mac's CA. Old temporary grants and their aliases are not restored.
+   On servers enrolled for temporary access, it also adds this Mac's CA with the same principal and restrictions, and checks a real certificate login through it with a short-lived validation certificate (one Touch ID for all of them; the certificate grants nothing and is never saved). Once the new Touch ID login works, every CA of the lost Mac the inventory recorded is removed too, by its exact key: only that Mac could use it. If the certificate check fails (the server refuses certificates, its clock is far off, you deny the prompt), nothing old is kept because of it: the server is marked "temporary access not confirmed", and `authorize HOST --temporary-access` finishes it later. `--keep-emergency-key` never keeps the lost Mac's CA. Old temporary grants and their aliases are not restored.
 5. Offers the `ssh` config blocks, writes the new inventory backup (only when every server moved) and runs `audit` (one more Touch ID per server).
 
-If a server fails, its old keys (and its old CA) stay, the cloud backup is left as it was, and running `recover` again skips the servers already moved. A server whose keys moved but whose CA replacement is unfinished is not skipped: the next run finishes it, through this Mac's Touch ID key if the old emergency key is gone. Removing the CA line from `authorized_keys` retires the lost Mac's certificates there; trust configured elsewhere on a server (for example `TrustedUserCAKeys`) is not checked.
+Before changing anything, `recover` keeps a dated copy of the backup the kit opens (`inventory-before-recovery-DATE.age`), and it records each server in this Mac's inventory as soon as that server is done. If a server fails (it cannot be reached, or the new Touch ID login does not work), its old keys and CA stay, the cloud backup is left as it was, and running `recover` again skips the servers already moved. If a run is interrupted after a server changed, the next run finishes that server, through this Mac's Touch ID key when the kit no longer opens it. If a later command rewrote the backup in the meantime, point `--inventory` at the dated copy. Removing the CA line from `authorized_keys` retires the lost Mac's certificates there; trust configured elsewhere on a server (for example `TrustedUserCAKeys`) is not checked.
 
 `touchid-ssh-agent recovery test emergency-kit.txt` checks, without changing anything, that the kit still opens every server. Run it now and then.
 
@@ -185,7 +187,7 @@ age -d -i emergency-kit.txt inventory.age     # server list; asks for the passph
 ssh -i emergency-kit.txt -p PORT USER@HOST    # asks for the passphrase
 ```
 
-Then remove the lost Mac's login key from each server (`ssh-keygen -lf ~/.ssh/authorized_keys` shows each line's fingerprint) and, where the inventory shows `temporaryAccess`, the `cert-authority` line whose fingerprint is its `caFingerprint`. Then set up the new Mac, `authorize` every server again, and retire the emergency key you used. Both paths are written inside the kit (kits created before this version describe the login key only).
+Then remove the lost Mac's login key from each server (`ssh-keygen -lf ~/.ssh/authorized_keys` shows each line's fingerprint) and, where the inventory shows `temporaryAccess`, the `cert-authority` lines whose fingerprint is its `caFingerprint` (and those named in its `caRotation`, if it has one). Then set up the new Mac, `authorize` every server again, and retire the emergency key you used. Both paths are written inside the kit (kits created before this version describe the login key only).
 
 ## Commands
 

@@ -21,7 +21,7 @@
 
 | Gate | Evidence |
 | --- | --- |
-| E1: CA, inventory, enrollment, audit, deauthorize, recover | Docker: *authorize --temporary-access: one scoped CA line per server, distinct principals, inventory and backup*; *audit checks the CA scope*; *deauthorize removes the CA line*; *a server that refuses certificates is recorded unverified*; *a replaced CA*; the four *Recovery of temporary-access CA trust* tests. Unit: *CA: separate Secure Enclave key, never on the login agent's socket*; *inventory: older files load*. |
+| E1: CA, inventory, enrollment, audit, deauthorize, recover | Docker: *authorize --temporary-access: one scoped CA line per server, distinct principals, inventory and backup*; *audit checks the CA scope*; *deauthorize removes the CA line*; *a server that refuses certificates is recorded unverified*; *a replaced CA*; the five *Recovery of temporary-access CA trust* tests. Unit: *CA: separate Secure Enclave key, never on the login agent's socket*; *inventory: older files load*. |
 | E2: certificate builder, Ed25519 agent, P-256 CA | Unit: `ssh-keygen -L` reads every field; signature covers every field (tampering any region fails both our check and `ssh-keygen`); invalid fields refused; parsing `ssh-keygen`'s own certificates; fuzzed malformed input; Secure Enclave CA signature accepted by `ssh-keygen`. Docker: real `sshd` logins with the certificate. |
 | E3: job, grant directories, cleanup | Unit (in-process job): denial, timeout, abandoned start, vanished caller mid-prompt and digest mismatch publish nothing; abort, stop and clock-driven expiry remove everything. Docker: crash and cleanup, interrupted CLI, expiry with a held agent connection, launchd job. Unit cleanup test: manifests, symlinks, unexpected files, reused pids. |
 | E4: CLI, aliases, JSON, help, instructions | Docker: error cases emit one JSON document and the right exit code before any grant exists; returned argv used for repeated commands; personal `~/.ssh/config` unchanged; old argv fails after stop. Unit: generated config checked with `ssh -G`, unknown names fail offline, removed config fails. |
@@ -40,9 +40,9 @@
 | Stop, crash, sleep/wake, delayed timers, clock changes, connected clients | Docker stop and crash tests; unit clock tests (wall clock set back with the monotonic clock advanced, wall clock jumped forward, held connection refused). Real sleep/wake: pending. |
 | JSON consistency; instructions match the CLI; denial causes no prompt loop | Docker JSON envelope checks; `access` never retries a prompt (one job, one prompt). |
 | Audit and recovery rotate CA trust without touching unrelated keys | Docker audit and recovery tests (bootstrap key preserved, duplicates removed, other CA lines counted, not removed). |
-| A still-valid old certificate fails fresh authentication after verified replacement and old-CA removal | Docker *recover: CA replaced where it verifies…*: the old Mac's live grant works before, fails after; new CA, login and emergency keys work. |
+| A still-valid old certificate fails fresh authentication after old-CA removal | Docker *recover, interrupted…*: the old Mac's live grant works before and fails after, on a server where the new CA verified and on the one whose run was interrupted; *recover again…*: new CA, login and emergency keys work. |
 | Interruption after new-key installation, new-CA verification or partial old-CA removal resumes; fingerprint matches alone never skip CA work; offline targets stay pending | Docker: the cert-refusing server stays pending with old trust; the retry from a simulated half-finished state (login moved, old emergency key gone, old CA present) is not skipped and finishes through the Touch ID key. |
-| Read-only `recovery test`; old inventories; `--keep-emergency-key`; duplicate old lines; failed new-CA check; no grants restored | Docker recovery tests; the existing Phase 1.5 recover tests (inventories without CA fields). |
+| Read-only `recovery test`; old inventories; `--keep-emergency-key`; duplicate old lines; failed new-CA check (old credentials still removed, enrollment unconfirmed); interrupted run resumed; no grants restored | Docker recovery tests; the existing Phase 1.5 recover tests (inventories without CA fields). |
 | Inventory round trip, older files, backup holds durable trust, no live grant restored | Unit inventory tests; Docker backup decryption checks. |
 | Dated aliases unique, mapped to the right account, not replacing permanent aliases; old `-F` commands cannot reconnect | Unit names and `ssh -G` tests; Docker stop test. |
 | Cleanup preserves personal config, user files and live grants; uncertain ownership skipped | Unit cleanup test; Docker crash test; *the personal ssh config is never changed*. |
@@ -55,13 +55,31 @@ Final runs on this branch (2026-10-15), with the Mac unlocked:
 | Command | Result |
 | --- | --- |
 | `make build` | Passed (release build). |
-| `make test` | Passed: 56 tests (the 37 earlier tests unchanged, plus 19 new unit, Secure Enclave, in-process job and instructions tests). |
-| `make test-docker` | Passed: 96 tests (the 56 above plus 40 Docker tests, of which 15 cover temporary access and 4 CA recovery). |
+| `make test` | Passed: 57 tests (the 37 earlier tests unchanged, plus 20 new unit, Secure Enclave, in-process job and instructions tests). |
+| `make test-docker` | Passed: 98 tests (the 57 above plus 41 Docker tests, of which 16 cover temporary access and 5 CA recovery). |
 | `python3 -B scripts/verify-temporary-access-design.py` | Passed (the feasibility probe still works with the changed codec files and e2e image). |
 | `LAUNCH_ONLY=1 make test-touchid` | Passed: the agent runs under launchd and offers the test identity. |
-| `make test-touchid` (interactive) | Passed: 14/14 with a person at the Mac (2026-10-15). Login key: approve, deny, time out, approve again, all under launchd. Temporary access: enrollment with a real `current-set` CA (login check and validation certificate approved), issuance through the per-grant launchd job, three logins without prompts, the idle-sleep assertion held and released, the old command failing after stop, `approval_denied`, `approval_timeout`, and no grant directory or job left. |
+| `make test-touchid` (interactive) | Passed: 14/14 with a person at the Mac (2026-10-15, before the final-review fixes; not run again after them). Login key: approve, deny, time out, approve again, all under launchd. Temporary access: enrollment with a real `current-set` CA (login check and validation certificate approved), issuance through the per-grant launchd job, three logins without prompts, the idle-sleep assertion held and released, the old command failing after stop, `approval_denied`, `approval_timeout`, and no grant directory or job left. |
 
 `swift run touchid-ssh-agent-selftest --docker --access-only` runs only the temporary-access and CA-recovery Docker tests.
+
+## Final review before release
+
+Two independent read-only reviews (recovery safety, and upgrades for 0.1.0 users who never use temporary access) found no problem for those users, and these problems in recovery and elsewhere, all fixed:
+
+| Problem | Fix | Test |
+| --- | --- | --- |
+| `recover` saved servers only at the end, so an interrupted run could leave a moved server unrecognized, with the kit unable to reach it | Each server's record is saved as soon as it is done; a server whose record shows an interrupted run is finished through the new Touch ID key | Docker: a real run is interrupted (test-only `TOUCHID_SSH_AGENT_TEST_INTERRUPT`) right after a server's old keys are removed, the kit's key is then removed there, and the next run finishes it through the Touch ID key |
+| A failed certificate check through the new CA kept every old credential, including the lost Mac's login key | Once the new login works, the lost Mac's login key, the used emergency key and every lost-Mac CA are removed; the new CA is recorded as unconfirmed for `authorize --temporary-access` (a deliberate change to the original design, approved during the review) | Docker: a server refusing certificates loses all old credentials, `access` refuses it, and `authorize --temporary-access` confirms it later |
+| A server already finished for the CA but not skipped could fail its check (principal missing from the validation certificate) or lose its record | CA steps run only where CA work is pending; other servers keep this Mac's record | Covered by the resumed run |
+| A server enrolled on the new Mac before `recover` was skipped while the lost Mac's CA stayed | Complete means every recorded lost-Mac CA is recorded as removed | Docker: the new Mac enrolls a server first; `recover` removes the old CAs and keeps the new Mac's principal |
+| Only one old CA was retired when the lost Mac had left a CA replacement unfinished | All recorded CAs (enrolled and both sides of a pending replacement, minus this Mac's) are retired, each checked against its fingerprint | Docker: the same server also trusts the CA the lost Mac was replacing |
+| A later command could rewrite the backup the kit opens before a retry | A dated copy is kept as soon as RECOVER is typed (an identical copy is reused) | Docker: the copy exists and matches the original backup |
+| A second grant job on a live grant's directory deleted its files | A job leaves a directory alone unless it owns it | Unit: a second job and a wrong digest leave a live grant untouched |
+| Plain `authorize` required the server listing (new precondition) | Without `--temporary-access`, the 0.1.0 install script again | Existing authorize tests |
+| `migrate` suggested `access stop` to everyone; lock errors were misreported on file systems without `flock` | Shown only when temporary access is in use; unsupported `flock` proceeds unlocked, as before the lock | — |
+
+Known limitation, unchanged from 0.1.0: a command on the new Mac that writes the backup before `recover` runs (for example `authorize` with the same backup folder configured) replaces the old Mac's `inventory.age`. Run `recover` first on a new Mac.
 
 ## Pending manual checks
 
