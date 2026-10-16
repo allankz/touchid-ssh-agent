@@ -25,14 +25,14 @@
 | E2: certificate builder, Ed25519 agent, P-256 CA | Unit: `ssh-keygen -L` reads every field; signature covers every field (tampering any region fails both our check and `ssh-keygen`); invalid fields refused; parsing `ssh-keygen`'s own certificates; fuzzed malformed input; Secure Enclave CA signature accepted by `ssh-keygen`. Docker: real `sshd` logins with the certificate. |
 | E3: job, grant directories, cleanup | Unit (in-process job): denial, timeout, abandoned start, vanished caller mid-prompt and digest mismatch publish nothing; abort, stop and clock-driven expiry remove everything. Docker: crash and cleanup, interrupted CLI, expiry with a held agent connection, launchd job. Unit cleanup test: manifests, symlinks, unexpected files, reused pids. |
 | E4: CLI, aliases, JSON, help, instructions | Docker: error cases emit one JSON document and the right exit code before any grant exists; returned argv used for repeated commands; personal `~/.ssh/config` unchanged; old argv fails after stop. Unit: generated config checked with `ssh -G`, unknown names fail offline, removed config fails. |
-| E5: real servers, interactive checks, release docs | Docker suites and the feasibility probe pass. Interactive Touch ID checks: see [Pending](#pending-manual-checks). |
+| E5: real servers, interactive checks, release docs | Docker suites and the feasibility probe pass; `make test-touchid` passed 14/14 with real Touch ID. Still unchecked by hand: see [Pending](#pending-manual-checks). |
 
 ## Required cases
 
 | Case (from the design) | Covered by |
 | --- | --- |
 | One host and comma lists; whitespace, empty items, duplicates, ambiguity; validation before approval | Docker *access: unknown, unenrolled, ambiguous and malformed requests…* and *one approval for two targets* (`"srv-a, srv-b,e2e-a"` collapses to two targets). Nonstandard ports go through ssh aliases (all Docker servers use mapped ports). |
-| One Touch ID for several targets; denial, timeout, abandoned or failed start publish nothing | Docker log check (one `issued` per grant); in-process job tests. Real prompts: `make test-touchid` steps 6–8 (pending). |
+| One Touch ID for several targets; denial, timeout, abandoned or failed start publish nothing | Docker log check (one `issued` per grant); in-process job tests. Real prompts: `make test-touchid` steps 6–8 (passed). |
 | Repeated commands without more Touch ID; other identities and master connections cannot satisfy readiness | Docker repeated-command test; *the readiness check is not satisfied by another key*; the grant config forces `ControlPath none` and `IdentitiesOnly`. |
 | Unselected principal, bare key, expired and malformed certificates rejected | Docker (`-o Port` to the third server, `PubkeyAcceptedAlgorithms=ssh-ed25519`), expiry test, unit tampering tests. |
 | `force-command` wins; default denies PTY and forwarding; `--allow-pty` enables only PTY | Docker *--force-command and --allow-pty* (forwarding tried with `ClearAllForwardings=no`), plus the default-grant PTY and `-R` checks. |
@@ -59,15 +59,14 @@ Final runs on this branch (2026-10-15), with the Mac unlocked:
 | `make test-docker` | Passed: 95 tests, including 15 temporary-access and 4 CA-recovery Docker tests next to the earlier Docker tests. |
 | `python3 -B scripts/verify-temporary-access-design.py` | Passed (the feasibility probe still works with the changed codec files and e2e image). |
 | `LAUNCH_ONLY=1 make test-touchid` | Passed: the agent runs under launchd and offers the test identity. |
-| `make test-touchid` (interactive) | **Not run**: it needs a person to touch, deny and ignore the sensor. |
+| `make test-touchid` (interactive) | Passed: 14/14 with a person at the Mac (2026-10-15). Login key: approve, deny, time out, approve again, all under launchd. Temporary access: enrollment with a real `current-set` CA (login check and validation certificate approved), issuance through the per-grant launchd job, three logins without prompts, the idle-sleep assertion held and released, the old command failing after stop, `approval_denied`, `approval_timeout`, and no grant directory or job left. |
 
 `swift run touchid-ssh-agent-selftest --docker --access-only` runs only the temporary-access and CA-recovery Docker tests.
 
 ## Pending manual checks
 
-These cannot be automated without pressing the sensor or changing the user's session, so they are left for a person:
+`make test-touchid` covered real Touch ID approval, denial and timeout for the login key and for CA issuance under launchd. These still need a person, because they change the user's session:
 
-- `make test-touchid`: real Touch ID approval, denial and timeout for the login key (steps 1–4) and for CA issuance under launchd (steps 5–8), repeated logins without prompts, the idle-sleep assertion appearing in `pmset -g assertions` and disappearing on stop.
 - Locked-screen operation: request a grant, lock the screen (⌃⌘Q), and from another machine or an existing session run the returned command; it should keep working while locked.
 - Sleep and wake: with a short grant, sleep the Mac past the deadline; after wake no signature may be produced and the grant files must be gone within a few seconds.
 - Logout: logging out must end the grant job (it is not restarted at the next login).

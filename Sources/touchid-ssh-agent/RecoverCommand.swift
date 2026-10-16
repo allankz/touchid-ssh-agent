@@ -253,7 +253,7 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
     caPlan?.stop()
     agent.stop()
 
-    var inventory = try InventoryStore.update(paths) { inventory -> Inventory in
+    try InventoryStore.update(paths) { inventory in
         inventory.mac = IdentityStore.defaultComment()
         for result in results where result.ok {
             inventory.servers.removeAll { $0.isSameServer(as: result.entry) && $0.alias != result.entry.alias }
@@ -266,7 +266,6 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
                 inventory.servers[index].lastAuditResult = result.entry.lastAuditResult
             }
         }
-        return inventory
     }
     let failed = results.filter { !$0.ok }
     if failed.isEmpty {
@@ -289,10 +288,9 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
         recovered[index].alias = name
         recovered[index].destination = name
         let renamed = recovered[index]
-        inventory = try InventoryStore.update(paths) { inventory -> Inventory in
+        try InventoryStore.update(paths) { inventory in
             inventory.servers.removeAll { $0.alias == entry.alias }
             inventory.upsert(renamed)
-            return inventory
         }
     }
 
