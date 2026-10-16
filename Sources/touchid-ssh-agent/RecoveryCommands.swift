@@ -545,9 +545,11 @@ func audit(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
 }
 
 /// Checks the inventory servers named in `aliases` (all when empty), records
-/// the results and returns how many need attention.
+/// the results and returns how many need attention. `exportBackup` is false
+/// when the backup must stay as it is (a partial recovery: the old kit has to
+/// open it again).
 @discardableResult
-func runAudit(aliases wanted: Set<String>, paths: AgentPaths) throws -> Int {
+func runAudit(aliases wanted: Set<String>, paths: AgentPaths, exportBackup: Bool = true) throws -> Int {
     let inventory = try InventoryStore.load(from: paths)
     let entries = inventory.servers.filter { wanted.isEmpty || wanted.contains($0.alias) }
     guard !entries.isEmpty else {
@@ -600,7 +602,7 @@ func runAudit(aliases wanted: Set<String>, paths: AgentPaths) throws -> Int {
             }
         }
     }
-    reportBackup(InventoryBackup.export(paths: paths), paths: paths)
+    if exportBackup { reportBackup(InventoryBackup.export(paths: paths), paths: paths) }
     Out.say(problems == 0 ? "\nAll servers have both keys." : "\n\(problems) server\(problems == 1 ? "" : "s") need attention: run `\(tool) authorize` for them.")
     return problems
 }

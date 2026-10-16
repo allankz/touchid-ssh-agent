@@ -9,6 +9,8 @@ func migrate(paths: AgentPaths) throws {
     let emergency = try RecoveryStore.load(from: paths)
     let settings = SettingsStore.load(from: paths)
     let inventory = try InventoryStore.load(from: paths)
+    let ca = try CertificateAuthorityStore.load(from: paths)
+    let enrolled = inventory.servers.filter { $0.temporaryAccess != nil }
     guard identity != nil || !inventory.servers.isEmpty else {
         Out.say("Nothing to move yet: this Mac has no Touch ID key. Start with `\(tool) setup`.")
         return
@@ -28,6 +30,10 @@ func migrate(paths: AgentPaths) throws {
         Out.say("                  " + (backupDate.map { "inventory.age updated \(formatter.string(from: $0))" } ?? "no inventory.age yet"))
     } else {
         Out.say("  Backup folder   none")
+    }
+    if let ca {
+        Out.say("  Temporary CA    \(ca.fingerprint), trusted by \(enrolled.count) server\(enrolled.count == 1 ? "" : "s")")
+        Out.say("                  Lives only in this Mac's Secure Enclave, like the Touch ID key.")
     }
     Out.say("  Servers         \(inventory.servers.count)")
     for entry in inventory.servers {
@@ -65,6 +71,17 @@ func migrate(paths: AgentPaths) throws {
         if let emergency, entry.recoveryKeyFingerprint != emergency.fingerprint {
             warnings.append("\(entry.alias) was authorized with another emergency key. Run `\(tool) authorize \(entry.destination)` again.")
         }
+        if let enrollment = entry.temporaryAccess {
+            if let ca, enrollment.caFingerprint != ca.fingerprint {
+                warnings.append("\(entry.alias) trusts another temporary-access CA. Run `\(tool) authorize \(entry.destination) --temporary-access` again.")
+            }
+            if enrollment.caRotation != nil {
+                warnings.append("\(entry.alias) has an unfinished CA replacement. Finish it before you switch (run recover or authorize again).")
+            }
+            if !enrollment.verified {
+                warnings.append("\(entry.alias) was enrolled for temporary access, but a certificate login was never confirmed.")
+            }
+        }
         if entry.hostKeys?.isEmpty ?? true {
             warnings.append("\(entry.alias) has no host key recorded, so recover would trust whatever key it presents. "
                 + "Run `\(tool) audit \(entry.alias)` to record the one ssh trusts.")
@@ -99,10 +116,18 @@ func migrate(paths: AgentPaths) throws {
          keys, removes this Mac's key, starts the agent, offers the ssh config
          blocks and finishes with an audit.
     """)
+    if !enrolled.isEmpty {
+        Out.say("""
+             On the \(enrolled.count) server\(enrolled.count == 1 ? "" : "s") with temporary access, it also adds the new Mac's CA,
+             checks a certificate login through it (one more Touch ID) and removes this
+             Mac's CA. Grants active on this Mac are not carried over: request new ones.
+        """)
+    }
 
     Out.section("Back on this Mac, afterwards")
     Out.say("""
-      recover took this Mac's key off the servers, so it no longer logs in. To clean up:
+      recover took this Mac's key\(enrolled.isEmpty ? "" : " and CA") off the servers, so it no longer logs in. To clean up:
+             \(tool) access stop
              \(tool) uninstall
              rm -rf \(Terminal.shellQuoted(paths.displayPath(paths.directory)))
       and remove the Host blocks from ~/.ssh/config if you will not ssh from this Mac.

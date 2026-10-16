@@ -163,7 +163,12 @@ public enum AccessLauncher {
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        // The job starts with default signal handling, whatever the CLI ignored.
+        var defaults = sigset_t()
+        sigemptyset(&defaults)
+        for signalNumber in [SIGINT, SIGTERM, SIGHUP, SIGPIPE] { sigaddset(&defaults, signalNumber) }
+        posix_spawnattr_setsigdefault(&attributes, &defaults)
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF))
         let environment = ProcessInfo.processInfo.environment
             .merging([AgentPaths.environmentVariable: paths.directory.path]) { $1 }
             .map { "\($0.key)=\($0.value)" }
@@ -236,7 +241,14 @@ public enum CertificateLoginCheck {
             return .failed("could not run ssh: \(error)")
         }
         let finished = done.wait(timeout: .now() + timeout) == .success
-        if process.isRunning { process.terminate() }
+        if process.isRunning {
+            process.terminate()
+            // ssh keeps SIGTERM ignored when its parent ignores it (as `access`
+            // does while it handles Ctrl-C itself), so fall back to SIGKILL.
+            let grace = Date().addingTimeInterval(2)
+            while process.isRunning, Date() < grace { usleep(50_000) }
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
         process.waitUntilExit()
         errors.fileHandleForReading.readabilityHandler = nil
         lock.lock()

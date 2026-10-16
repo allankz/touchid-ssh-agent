@@ -95,8 +95,9 @@ These instructions ship with touchid-ssh-agent \(version) and describe this vers
      covers the task; otherwise tell the user. Do not stop a grant other work may need.
    - `access_busy`: another request is waiting for approval. Wait, then check status.
    - `invalid_arguments`, `invalid_duration`, `ambiguous_target`, `readiness_failed`,
-     `unsupported_configuration`, `host_key_missing`, `ca_mismatch`, `rotation_pending`:
-     explain the message to the user and stop.
+     `unsupported_configuration`, `host_key_missing`, `ca_mismatch`, `rotation_pending`,
+     `ca_unusable`, `socket_path_too_long` and any other code: explain the message to
+     the user and stop.
 5. When a grant was only for your task, end it: `touchid-ssh-agent access stop --json`.
 6. When a grant expires, logins fail. Report it; never extend access silently.
 7. If status lists `stale_grants`, `touchid-ssh-agent access cleanup --json` removes only
