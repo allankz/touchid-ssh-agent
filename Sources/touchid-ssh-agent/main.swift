@@ -4,7 +4,7 @@ import Foundation
 import LocalAuthentication
 import TouchIDSSHCore
 
-let version = "0.1.0"
+let version = "0.2.0"
 let tool = "touchid-ssh-agent"
 
 /// The help text, grouped by what the user is doing.

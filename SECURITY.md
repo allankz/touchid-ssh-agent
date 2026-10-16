@@ -1,12 +1,12 @@
 # Security Policy
 
-touchid-ssh-agent is experimental software (0.1.x) and has not been independently audited. Keep the emergency key installed on every server you protect with it (`touchid-ssh-agent audit`).
+touchid-ssh-agent is experimental software (0.2.x) and has not been independently audited. Keep the emergency key installed on every server you protect with it (`touchid-ssh-agent audit`).
 
 ## Supported versions
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x (latest `main`) | Yes |
+| 0.2.x (latest `main`) | Yes |
 | Anything older | No |
 
 ## Reporting a vulnerability
