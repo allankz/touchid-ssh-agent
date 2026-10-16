@@ -173,6 +173,23 @@ public enum CATrust {
         return normalized(line.options) == normalized(expected) ? .exact : .narrower
     }
 
+    /// Judges an options string on its own, as if it preceded the CA key.
+    public static func scope(ofOptions raw: String, principal: String) -> Scope? {
+        guard let options = AuthorizedKeysLine.parseOptions(raw) else { return nil }
+        return scope(of: AuthorizedKeysLine(options: options, rawOptions: raw, keyType: SSHKeyFormat.keyType, blob: Data()),
+                     principal: principal)
+    }
+
+    /// The recorded options when they still describe the expected scope (as
+    /// installed, or narrowed by an administrator) and can be written back in
+    /// a single-quoted shell string; otherwise the standard options.
+    public static func safeOptions(_ recorded: String, principal: String) -> String {
+        guard !recorded.contains("'"), !recorded.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              let scope = scope(ofOptions: recorded, principal: principal) else { return options(principal: principal) }
+        if case .broader = scope { return options(principal: principal) }
+        return recorded
+    }
+
     static func normalized(_ options: [AuthorizedKeysOption]) -> [String] {
         options.map { "\($0.name)=\($0.value ?? "")" }.sorted()
     }

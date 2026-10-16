@@ -200,20 +200,24 @@ public enum CertificateLoginCheck {
         process.standardInput = FileHandle.nullDevice
 
         let lock = NSLock()
-        var text = ""
+        var pending = Data()
         var accepted = false
         var outcome: Outcome?
         var lastError = ""
+        var lastLine = ""
         let done = DispatchSemaphore(value: 0)
         errors.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
             lock.lock()
             defer { lock.unlock() }
             guard !chunk.isEmpty else { return }
-            text += String(decoding: chunk, as: UTF8.self)
-            while let newline = text.firstIndex(of: "\n") {
-                let line = String(text[..<newline])
-                text = String(text[text.index(after: newline)...])
+            // Split on bytes: ssh ends its log lines with \r\n, which Swift treats as one Character.
+            pending.append(chunk)
+            while let newline = pending.firstIndex(of: UInt8(ascii: "\n")) {
+                let line = String(decoding: pending[pending.startIndex..<newline], as: UTF8.self)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+                pending = Data(pending[(newline + 1)...])
+                lastLine = line
                 if line.contains("Server accepts key:"), line.contains("ED25519-CERT"), line.contains(keyFingerprint) {
                     accepted = true
                 }
@@ -238,7 +242,9 @@ public enum CertificateLoginCheck {
         lock.lock()
         defer { lock.unlock() }
         if let outcome { return outcome }
-        if !finished { return .failed("no answer within \(Int(timeout)) s") }
+        if !finished {
+            return .failed("no answer within \(Int(timeout)) s (last: \(DisplayText.sanitize(lastLine, maxLength: 160)))")
+        }
         let reason = DisplayText.sanitize(lastError.isEmpty ? "ssh exited with status \(process.terminationStatus)" : lastError,
                                           maxLength: 200)
         return .failed(reason)
