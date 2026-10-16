@@ -214,7 +214,8 @@ Then remove the lost Mac's login key from each server (`ssh-keygen -lf ~/.ssh/au
 | `access status [--json]` | Shows validity, selected targets, aliases and exact SSH commands. Never prompts. |
 | `access stop [--json]` | Stops the active grant and removes its local generated files. |
 | `access cleanup [--json]` | Removes files left by grants that ended abnormally; keeps live, valid grants. |
-| `access help` / `instructions` | Detailed help / the Markdown workflow for AI agents. |
+| `access help` | Detailed help: enrollment, aliases, cleanup and limits. |
+| `instructions [--snippet \| --add-to FILE]` | The Markdown workflow for AI agents; `--snippet` prints a short block for `CLAUDE.md` or `AGENTS.md`, and `--add-to` writes it into that file after asking. |
 
 **New Mac and recovery**
 
@@ -302,7 +303,16 @@ An AI agent (or script) running on your Mac **can request** a signature through 
 - If you deny or ignore the prompt, authentication fails.
 - The prompt shows who asked (`ssh ← zsh ← claude`) and, when possible, where to.
 - Agents running off the Mac (cloud, a container without the socket mounted, another machine) cannot reach the agent.
-- For unattended work, an agent can request [temporary access](#temporary-ssh-access) for named servers and a limited time; you approve it once with Touch ID. `touchid-ssh-agent instructions` prints the workflow, and [docs/ai-agents.md](docs/ai-agents.md) has a block to paste into `AGENTS.md` or `CLAUDE.md`.
+- For unattended work, an agent can request [temporary access](#temporary-ssh-access) for named servers and a limited time; you approve it once with Touch ID.
+
+To tell your AI agent about it, add a short block to the instructions file it reads:
+
+```bash
+touchid-ssh-agent instructions --add-to ~/.claude/CLAUDE.md    # Claude Code
+touchid-ssh-agent instructions --add-to ~/.codex/AGENTS.md     # Codex
+```
+
+The command shows the block and asks before writing; running it again updates the same block instead of adding another. `instructions --snippet` prints the block to paste anywhere else (a project's `AGENTS.md`, another agent's settings). The block tells the agent to read `touchid-ssh-agent instructions`, the full workflow for the installed version, to check `access status --json` first, to request the fewest servers for the shortest time, and to use exactly the returned commands. See [docs/ai-agents.md](docs/ai-agents.md).
 
 The agent only accepts connections from your own user (UID checked on the socket). The socket has mode `0600`, inside a `0700` directory.
 

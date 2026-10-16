@@ -41,15 +41,19 @@ The inventory records the target's CA trust, principal, fingerprint and audit re
 
 ## Copyable discovery block
 
-Users can place this in `AGENTS.md`, `CLAUDE.md` or equivalent instructions:
+Users can place this in `AGENTS.md`, `CLAUDE.md` or equivalent instructions. The installed CLI prints the same block with `touchid-ssh-agent instructions --snippet`, and adds it to a file (or updates the copy it added before) with `touchid-ssh-agent instructions --add-to FILE`, after showing it and asking for confirmation. For example `~/.claude/CLAUDE.md` for Claude Code, or `~/.codex/AGENTS.md` for Codex.
 
 ```markdown
-For temporary SSH access, run `touchid-ssh-agent instructions` and follow the
-installed workflow. Check `access status --json` first. When needed, request
-`access HOST[,HOST...] --for DURATION --json`; the user approves with Touch ID.
-Use the returned per-target `ssh_argv`, including its `-F` config and dated alias.
-Do not bypass denial or expiry, retry
-prompts in a loop, or stop/replace an unrelated active grant.
+## SSH access to servers (touchid-ssh-agent)
+
+To run commands on a server over SSH, use temporary access from touchid-ssh-agent.
+Run `touchid-ssh-agent instructions` once and follow that workflow: check
+`touchid-ssh-agent access status --json` first; when needed, request
+`touchid-ssh-agent access HOST[,HOST...] --for DURATION --json` with the fewest
+servers and the shortest time that fit the task, and wait while the user approves
+with Touch ID. Then use exactly the returned per-target `ssh_argv`, with its `-F`
+config and dated alias. Never bypass a denial or expiry, retry the prompt in a
+loop, fall back to other keys, or stop a grant you did not request.
 ```
 
 ## Acceptance

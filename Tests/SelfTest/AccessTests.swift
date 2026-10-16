@@ -371,6 +371,72 @@ func runAccessUnitTests() {
         check(throwsError { _ = try GrantSSHConfig.render(quoted, in: directory) }, "unsafe host names refused")
     }
 
+    test("instructions for AI agents: the snippet matches the docs; --add-to asks, adds once and updates in place") {
+        let directory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let paths = AgentPaths(directory: directory.appendingPathComponent("a"))
+        let snippet = try run(cliBinary, ["instructions", "--snippet"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let docs = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("docs/ai-agents.md")
+        let guide = (try? String(contentsOf: docs, encoding: .utf8)) ?? ""
+        let block = guide.components(separatedBy: "## Copyable discovery block").last?
+            .components(separatedBy: "```markdown\n").dropFirst().first?
+            .components(separatedBy: "\n```").first ?? ""
+        check(!snippet.isEmpty && snippet == block.trimmingCharacters(in: .whitespacesAndNewlines),
+              "docs/ai-agents.md holds the same block the CLI prints")
+        check(snippet.contains("touchid-ssh-agent instructions") && snippet.contains("access status --json")
+              && snippet.contains("ssh_argv"), "the block points to the workflow")
+
+        func addTo(_ file: URL, answer: String) throws -> ShellResult {
+            try expectScript(#"""
+            spawn $env(CLI) instructions --add-to $env(FILE)
+            expect {
+              "Write it?" { send -- "$env(ANSWER)\r"; exp_continue }
+              eof
+            }
+            """#, paths: paths, extra: ["FILE": file.path, "ANSWER": answer], in: directory)
+        }
+        let file = directory.appendingPathComponent("CLAUDE.md")
+        try "# My rules\nBe brief.".write(to: file, atomically: true, encoding: .utf8)
+        let declined = try addTo(file, answer: "n")
+        check(declined.stdout.contains("Nothing was changed"), "declined: \(declined.stdout.suffix(200))")
+        check(try String(contentsOf: file, encoding: .utf8) == "# My rules\nBe brief.", "unchanged when declined")
+
+        let added = try addTo(file, answer: "y")
+        check(added.stdout.contains("Added the block"), "added: \(added.stdout.suffix(300))")
+        let text = try String(contentsOf: file, encoding: .utf8)
+        check(text.hasPrefix("# My rules\nBe brief.\n\n<!-- touchid-ssh-agent: begin"), "appended after the existing text")
+        check(text.components(separatedBy: snippet).count == 2 && text.hasSuffix("<!-- touchid-ssh-agent: end -->\n"), "one block")
+
+        let again = try addTo(file, answer: "y")
+        check(again.stdout.contains("already has the current"), "second run: nothing to do")
+        check(try String(contentsOf: file, encoding: .utf8) == text, "unchanged on the second run")
+
+        // An older block (other text between the markers) is replaced in place.
+        let older = text.replacingOccurrences(of: snippet, with: "old wording") + "\n## After\nkept\n"
+        try older.write(to: file, atomically: true, encoding: .utf8)
+        let updated = try addTo(file, answer: "y")
+        check(updated.stdout.contains("will be replaced") && updated.stdout.contains("Updated the block"), "updated")
+        let after = try String(contentsOf: file, encoding: .utf8)
+        check(after == text + "\n## After\nkept\n", "updated in place, the rest kept byte for byte: \(after)")
+
+        let target = directory.appendingPathComponent("real-AGENTS.md")
+        let link = directory.appendingPathComponent("AGENTS.md")
+        try "".write(to: target, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        _ = try addTo(link, answer: "y")
+        check((try? FileManager.default.destinationOfSymbolicLink(atPath: link.path)) == target.path, "a linked file stays a link")
+        check(try String(contentsOf: target, encoding: .utf8).contains(snippet), "the link's target got the block")
+
+        let fresh = directory.appendingPathComponent("new/CLAUDE.md")
+        let refused = try run(cliBinary, ["instructions", "--add-to", fresh.path])
+        check(refused.status != 0 && refused.stderr.contains("--snippet"), "without a terminal it explains instead of writing")
+        check(!FileManager.default.fileExists(atPath: fresh.path), "nothing created without confirmation")
+        _ = try addTo(fresh, answer: "y")
+        check(try String(contentsOf: fresh, encoding: .utf8).hasPrefix("<!-- touchid-ssh-agent: begin"), "a new file is created after yes")
+        check(try run(cliBinary, ["instructions", "--bogus"]).status != 0, "unknown options refused")
+    }
+
     test("socket path length is checked before approval") {
         let long = AgentPaths(directory: URL(fileURLWithPath: "/tmp/" + String(repeating: "d", count: 70)))
         check(throwsError { try GrantDirectory.checkSocketPathLength(paths: long) }, "too long")
