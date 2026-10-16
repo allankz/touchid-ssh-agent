@@ -278,7 +278,7 @@ It then checks a real certificate login (one Touch ID for a validation certifica
 touchid-ssh-agent access app-server,worker-server --for 2h
 ```
 
-- Servers can be inventory names, ssh aliases or `user@host`; every one is checked before Touch ID, and one unknown or unenrolled server fails the whole request. `--for` is required and at most 12 hours.
+- Servers can be inventory names, ssh aliases or `user@host` (use the name or alias for a nonstandard port); every one is checked before Touch ID, and one unknown or unenrolled server fails the whole request. `--for` is required and at most 12 hours.
 - The summary shows each account, the exact expiry (local time and UTC) and the permissions. By default the accounts may run any command; `--force-command` limits every login to one command. No PTY unless `--allow-pty`; agent, port and X11 forwarding are always denied.
 - A separate one-shot launchd job generates a fresh Ed25519 key in its own memory, has the CA sign a certificate for it, then checks that every server accepts it (an authentication-only login, so no command runs) before the grant is reported as active. One grant is active at a time.
 

@@ -646,8 +646,13 @@ test("help is grouped by task, delete points to deauthorize, migrate warns and l
     let paths = AgentPaths(directory: directory.appendingPathComponent("a"))
     let environment = [AgentPaths.environmentVariable: paths.directory.path]
     let help = try run(cliBinary, ["help"], environment: environment).stdout
-    check(["Getting started", "Day to day", "New Mac and recovery", "Advanced", "deauthorize", "migrate"].allSatisfy(help.contains),
+    check(["Getting started", "Day to day", "Temporary access", "New Mac and recovery", "Advanced", "deauthorize", "migrate",
+           "--temporary-access", "access status", "instructions"].allSatisfy(help.contains),
           "sections and new commands: \(help.prefix(300))")
+    let instructions = try run(cliBinary, ["instructions"], environment: environment)
+    check(instructions.status == 0 && instructions.stdout.hasPrefix("# touchid-ssh-agent: temporary SSH access")
+          && instructions.stdout.contains("access status --json") && instructions.stdout.contains("ssh_argv")
+          && instructions.stdout.contains("authorize HOST --temporary-access"), "instructions print the AI workflow")
     let deleted = try run(cliBinary, ["delete"], environment: environment)
     check(deleted.status != 0 && deleted.stderr.contains("deauthorize --all"), "delete points to deauthorize: \(deleted.stderr)")
 
