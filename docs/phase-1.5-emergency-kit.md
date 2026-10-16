@@ -81,11 +81,11 @@ Read-only. It shows this Mac's keys, backup folder and servers, warns about what
 
 The same first steps without changing anything: it opens the inventory, loads the kit and logs in to every server with the emergency key only. Unknown host keys go to a scratch file, so not even `known_hosts` changes.
 
-### Planned Phase 2 recovery integration
+### Phase 2 recovery integration
 
-The implemented flow above covers login and emergency keys. When temporary SSH access ships, `recover` must also replace CA trust on targets enrolled in the inventory: add the new Mac's CA with the recorded scope, verify certificate authentication, then remove the old CA by its recorded public key/fingerprint and audit its absence. Do not skip unfinished CA migration just because the login and emergency keys already match the new Mac.
+Implemented with temporary SSH access. On servers enrolled in the inventory, `recover` also replaces CA trust: it adds the new Mac's CA with the recorded scope, verifies a certificate login through it (one Touch ID for a validation certificate covering every enrolled server), and only then removes the lost Mac's CA by its recorded public key and fingerprint, then audits its absence. It never skips unfinished CA work just because the login and emergency keys already match the new Mac; such a server is finished through the new Touch ID key when the old emergency key is gone.
 
-Keep the old/new CA identities and per-target progress until removal is verified, report unreachable or failed targets as pending, and preserve the existing recovery/backup safeguards. `--keep-emergency-key` does not preserve the lost Mac's CA. Temporary grants and aliases are not restored. `recovery test` stays read-only and reports recorded CA trust; manual kit instructions must explain removing the old CA using the decrypted inventory. The exact future sequence and acceptance cases are in the [Phase 2 recovery design](phase-2-temporary-credentials.md#required-recovery-sequence-for-ca-trust).
+The old and new CA identities and per-server progress are kept in the local inventory (`caRotation`) until removal is verified. Unreachable or failed servers stay pending, with their old trust, and the existing backup safeguards apply. `--keep-emergency-key` does not preserve the lost Mac's CA. Temporary grants and aliases are not restored. `recovery test` stays read-only and reports the recorded CA trust of each server. New kits explain how to remove the old CA by hand using the decrypted inventory. See the [Phase 2 recovery design](phase-2-temporary-credentials.md#required-recovery-sequence-for-ca-trust).
 
 ## Decisions
 

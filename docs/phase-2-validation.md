@@ -1,6 +1,6 @@
 # Temporary SSH access: prototype validation
 
-> Protocol feasibility check on 2026-10-15. This is not implementation or acceptance of the planned `access` feature.
+> Protocol feasibility check on 2026-10-15, made before the feature existed. The implemented feature and its validation are described in the [implementation record](phase-2-implementation.md); this probe still runs unchanged as a regression check of the protocol path.
 
 ## What the probe exercises
 

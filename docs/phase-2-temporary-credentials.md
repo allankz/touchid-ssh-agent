@@ -1,6 +1,6 @@
 # Phase 2: temporary SSH access
 
-> Status: **revised design proposal, not implemented**. Commands and JSON below are implementation contracts, not capabilities available in version 0.1.0. Prerequisites: Phase 1 validated with real Touch ID (`make test-touchid`) and installed; Phase 1.5 (emergency kit and inventory) in place.
+> Status: **implemented**. The commands and JSON below describe the shipped contract; [Implementation notes](#implementation-notes) list where the implementation settles details this design left open, and the [implementation record](phase-2-implementation.md) lists what was validated and what still needs a person at the Mac. Prerequisites: Phase 1 validated with real Touch ID (`make test-touchid`) and installed; Phase 1.5 (emergency kit and inventory) in place.
 
 ## Goal
 
@@ -52,7 +52,7 @@ touchid-ssh-agent access cleanup
 
 ## Dedicated help section
 
-When implemented, main help gets a separate **Temporary access** section, alongside Getting started, Day to day and New Mac and recovery. Do not advertise unavailable commands in the current executable.
+Main help has a separate **Temporary access** section, alongside Getting started, Day to day and New Mac and recovery.
 
 ```text
 Temporary access
@@ -293,7 +293,7 @@ Use `ssh-keygen -Lf` to check fields and real `sshd` logins to establish signatu
 
 ### Required recovery sequence for CA trust
 
-This is part of Phase 2 acceptance, not an optional cleanup after recovery. Current `recover` only handles login/emergency keys; it does not yet perform these CA steps.
+This is part of Phase 2 acceptance, not an optional cleanup after recovery. `recover` performs these steps; the Docker tests exercise them, including a server that refuses the new CA and a retry after an interrupted run.
 
 1. **Read the old trust from the kit-decrypted inventory.** Identify the old CA by its recorded public key and fingerprint on each enrolled target. Its private key is not needed for removal and cannot be restored onto the new Mac. Targets without temporary-access enrollment keep their existing recovery behavior; do not enroll them implicitly.
 2. **Prepare the new Mac once.** Create a new Secure Enclave CA when needed. Reuse that CA on a resumed recovery rather than creating another identity on every run. Retain the existing emergency-key Keep/Replace choice; `--keep-emergency-key` never means keeping the lost Mac's CA.
@@ -345,6 +345,22 @@ Required cases:
 The 2026-10-15 review used an OpenSSH 10.2p1 client and two disposable OpenSSH 10.0p2 servers. Tests confirmed P-256 CA/Ed25519 certificate interoperability, shared-principal access across servers, target-specific principal rejection, forced commands, expiry rejection of fresh authentication, and continued work on existing/master connections. These software test CA keys do **not** establish real Secure Enclave CA issuance or locked-screen operation of the future job.
 
 A subsequent probe uses an actual Secure Enclave P-256 CA, the production SSH codec/agent protocol, a memory-only Ed25519 key and three disposable servers. It verifies the transition from two authorized keys to scoped CA trust and repeated certificate authentication. Its CA deliberately has no biometric requirement; it does not validate the real Touch ID dialog or future job lifecycle. See the [validation report](phase-2-validation.md) for the exact coverage.
+
+## Implementation notes
+
+Details settled by the implementation:
+
+- **Jump hosts are not supported yet.** A target whose effective ssh configuration uses `ProxyJump` or `ProxyCommand` fails with `unsupported_configuration` in both `authorize --temporary-access` and `access`. Transport settings copied into the grant config are limited to `AddressFamily`, `ConnectTimeout` (15 s when unset), `ServerAliveInterval`, `ServerAliveCountMax` and `TCPKeepAlive`.
+- **Enrollment verifies a real certificate login.** After installing the CA line, `authorize --temporary-access` signs a validation certificate (one more Touch ID; `force-command true`, ten minutes, memory-only key) and authenticates with `ssh -N`. A server that rejects it is recorded with `verified: false`, and `access` refuses it until a later `authorize` succeeds. Host keys must already be in `known_hosts`, because the grant config pins them.
+- **A previous CA is replaced by `authorize` too.** When an entry recorded another CA (for example after `ca.se` was replaced because changed fingerprints invalidated it), `authorize --temporary-access` records a `caRotation`, installs and verifies this Mac's CA, then removes the recorded old CA through the user's usual access.
+- **Names.** Grant IDs are the local date plus 12 random hex digits; aliases are the inventory alias lowercased, reduced to `[a-z0-9._-]` and at most 32 characters, then `-access-<grant-id>` (with `-2`, `-3`… on collisions). Principals are `access-` plus 16 random hex digits. Certificate key IDs use UTC: `access-YYYYMMDD-HHMM-<serial>`.
+- **Grant files.** `access/grants/<grant-id>/` holds `manifest.json`, `request.json`, `job.plist` (launchd only), `control.sock`, `agent.sock`, `key.pub`, `key-cert.pub`, `ssh_config` and `known_hosts`. The control socket carries newline-delimited JSON between the CLI and the job (attach, issued, confirm, status, stop). The data directory must be short enough for these socket paths (104 bytes); `access` checks before approval.
+- **launchd.** Each grant has its own label, `local.touchid-ssh-agent.access.<data-directory hash>.<grant-id>`, with `RunAtLoad`, `LaunchOnlyOnce`, no `KeepAlive`, `ProcessType Interactive`. The job never unloads itself (launchd would signal it mid-teardown); `access stop`, `access cleanup` and the next request unload finished jobs. The automated tests start the job as a detached process instead (`TOUCHID_SSH_AGENT_ACCESS_LAUNCH=process`), except one launchd test.
+- **Readiness** runs `ssh -F <grant config> -v -N -T <alias>` for every target in parallel and requires both `Server accepts key: … ED25519-CERT <temporary key fingerprint>` and `Authenticated to`, then closes the connection.
+- **What the temporary agent signs.** Only `SSH_MSG_USERAUTH_REQUEST` payloads (`publickey` or `publickey-hostbound`) that offer the grant's key or certificate, for one of the selected accounts. Git signatures and arbitrary data are refused.
+- **Deadline.** The job keeps a monotonic deadline (`CLOCK_MONOTONIC`, which keeps counting during sleep) next to the wall-clock one and refuses to sign when either passed; a 2-second wall-clock timer and IOKit wake notifications trigger teardown.
+- **JSON.** `status` is `active`, `inactive`, `pending`, `stopped`, `cleaned` or `error`. Error codes: `invalid_arguments` and `invalid_duration` (exit 2); `unknown_target`, `not_enrolled`, `ambiguous_target`, `ca_mismatch`, `rotation_pending`, `host_key_missing`, `unsupported_configuration`, `socket_path_too_long`, `access_already_active`, `access_busy`, `approval_denied`, `approval_timeout`, `approval_unavailable`, `ca_unusable`, `cancelled`, `stopped`, `readiness_failed`, `job_failed`, `stop_failed`, `internal_error` (exit 1).
+- **Inventory.** `temporaryAccess` holds `targetId`, `principal`, `caPublicKey`, `caFingerprint`, `authorizedKeyOptions`, `enrolledAt`, `verified`, `lastAudit`, `lastAuditResult`, `lastGrant`, `caRotation` and `retiredCAFingerprint`. `caRotation.step` is `planned`, `replacement-added`, `replacement-verified` or `retirement-started`. The grant job writes `lastGrant` when the grant becomes active and its end reason (`expired`, `stopped`) when it ends; cleanup marks grants that vanished as `abandoned`. Grant records change only the local inventory; the encrypted backup is rewritten on enrollment, audit, recovery and deauthorization as before.
 
 ## Later options
 
