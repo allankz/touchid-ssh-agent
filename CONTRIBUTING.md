@@ -11,7 +11,7 @@ These are the project's promises to its users. Changes that weaken any of them n
 
 - **The private key never leaves the Secure Enclave.** Neither the login key nor the temporary-access CA: no export, no backup, no copy in memory or on disk.
 - **Every signature needs Touch ID.** Every login-key signature and every certificate from the CA. No reuse window, no silent mode, no "remember for N minutes", no password fallback.
-- **Temporary access is the one approved exception.** Phase 2 was approved to let a grant's own Ed25519 software key, generated in the grant job's memory and never written anywhere, sign SSH logins without further prompts after one Touch ID, for the selected servers only and until a deadline of at most 12 hours. It never applies to the login key or the CA. Longer grants, renewal, silent re-issuance or reuse windows for any other key need an issue and a discussion first.
+- **Temporary access is the one approved exception.** Temporary access (0.2.0) was approved to let a grant's own Ed25519 software key, generated in the grant job's memory and never written anywhere, sign SSH logins without further prompts after one Touch ID, for the selected servers only and until a deadline of at most 12 hours. It never applies to the login key or the CA. Longer grants, renewal, silent re-issuance or reuse windows for any other key need an issue and a discussion first.
 - **Small protocol surface.** The agents answer only "list identities" and "sign"; everything else gets `SSH_AGENT_FAILURE`. A grant's agent also signs only SSH logins for its accounts.
 - **The emergency kit stays off the Mac.** Only its public key is stored locally; the inventory backup is encrypted to it.
 - **No network calls, accounts or telemetry** from the agents. `authorize`, `audit`, `deauthorize`, `access` and `recover` only talk to the servers the user names or the inventory lists, through `ssh`.
@@ -49,8 +49,8 @@ make test-touchid   # interactive: approve, deny and time out real Touch ID prom
 - `Sources/touchid-ssh-agent/`: the CLI.
 - `Tests/SelfTest/`: the test suite.
 - `Tests/e2e/`: the `sshd` image used by the Docker tests.
-- `scripts/`: the interactive Touch ID test and the Phase 2 feasibility probe (`python3 -B scripts/verify-temporary-access-design.py`).
-- `docs/`: design notes for each phase, the AI guide and the Phase 2 implementation record.
+- `scripts/`: the interactive Touch ID test (`make test-touchid`).
+- `docs/`: the guide for AI agents, whose discovery block the tests compare with `instructions --snippet`, and the README images.
 
 ## Making a change
 
@@ -62,7 +62,7 @@ make test-touchid   # interactive: approve, deny and time out real Touch ID prom
 3. **Write user-facing text in English** (CLI output, errors, docs), and make errors actionable: say what to run next.
 4. **Never handle passphrases through command-line arguments or environment variables.** Other processes can read both. Use stdin, as the emergency kit builder does.
 5. **Treat everything from the socket or the server as untrusted.** Bound every read, and sanitize anything shown in the Touch ID prompt or written to the log.
-6. **Update the docs** (README, SECURITY.md, `docs/`) when behavior changes.
+6. **Update the docs** (README, SECURITY.md, `docs/ai-agents.md`) when behavior changes.
 
 ## No real infrastructure in the repository
 

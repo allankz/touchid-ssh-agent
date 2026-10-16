@@ -8,7 +8,7 @@ An SSH agent for macOS that keeps the key in the **Secure Enclave** and requires
 
 > Status: experimental (0.2.0). It does not replace an access recovery plan: always keep a second authorized key on the server (see [Recovery](#recovery)).
 >
-> 0.2.0 adds temporary SSH access for AI agents (Phase 2). Its real Touch ID approval under launchd passed the interactive `make test-touchid`; locked-screen, sleep/wake and logout behavior still need a manual check. See the [implementation record](docs/phase-2-implementation.md).
+> 0.2.0 adds temporary SSH access for AI agents. Its real Touch ID approval under launchd passed the interactive `make test-touchid`; locked-screen, sleep/wake and logout behavior still need a manual check. See the [release notes](RELEASE-NOTES.md).
 
 ## What problem does it solve?
 
@@ -365,11 +365,11 @@ The Touch ID key is tied to **this** Mac and, with the `current-set` policy, to 
 
 ## Roadmap
 
-- **Phase 1.5: emergency kit and inventory.** Done; design notes in [`docs/phase-1.5-emergency-kit.md`](docs/phase-1.5-emergency-kit.md).
+- **Emergency kit and inventory.** Done.
 - **Automated recovery.** Done: `recover` and `recovery test` move login and emergency keys and replace the lost Mac's CA trust, verified, on every enrolled server.
-- **Phase 2: temporary SSH access.** Implemented: direct host selection (`access HOST[,HOST...] --for DURATION`), one Touch ID to issue a scoped certificate, CA trust recorded in the inventory, dated aliases in separate generated SSH configs with automatic and manual cleanup, a dedicated help section, built-in instructions and JSON output for AI agents. Design in [`docs/phase-2-temporary-credentials.md`](docs/phase-2-temporary-credentials.md), with the [AI workflow](docs/ai-agents.md); what was validated, and how, in the [implementation record](docs/phase-2-implementation.md).
+- **Temporary SSH access.** Done in 0.2.0: direct host selection (`access HOST[,HOST...] --for DURATION`), one Touch ID to issue a scoped certificate, CA trust recorded in the inventory, dated aliases in separate generated SSH configs with automatic and manual cleanup, a dedicated help section, built-in instructions and JSON output for AI agents, with the [AI workflow](docs/ai-agents.md).
 
-[`PROMPT-PHASE-2.md`](PROMPT-PHASE-2.md) is the implementation handoff the feature was built from. The [validation report](docs/phase-2-validation.md) holds the earlier protocol feasibility probe.
+What changed in each version is in [`RELEASE-NOTES.md`](RELEASE-NOTES.md); what may come next is under [Coming next](#coming-next).
 
 ## Development
 
@@ -389,8 +389,8 @@ Layout:
 - `Sources/touchid-ssh-agent/`: CLI.
 - `Tests/SelfTest/`: test suite (an executable, because XCTest does not ship with the Command Line Tools).
 - `Tests/e2e/`: `sshd` image used by the end-to-end tests.
-- `scripts/`: the interactive Touch ID test and the Phase 2 feasibility probe.
-- `docs/`: design notes for each phase, the AI guide and the Phase 2 implementation record.
+- `scripts/`: the interactive Touch ID test.
+- `docs/`: the guide for AI agents and the README images.
 
 ### Why a file and not the Keychain
 

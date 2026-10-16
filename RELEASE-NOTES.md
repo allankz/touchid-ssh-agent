@@ -4,7 +4,7 @@
 
 Tag `v0.2.0`, merged into `main` on 2026-10-16 through [allankz/touchid-ssh-agent#1](https://github.com/allankz/touchid-ssh-agent/pull/1).
 
-These notes compare 0.2.0 with 0.1.0 as it stood at commit `69ecddc` (2026-10-09), the last 0.1.0 state before Phase 2. 0.1.0 was never tagged.
+These notes compare 0.2.0 with 0.1.0 as it stood at commit `69ecddc` (2026-10-09), the last 0.1.0 state before temporary access. 0.1.0 was never tagged.
 
 Still experimental. Keep the emergency key installed on every server (`touchid-ssh-agent audit`).
 
@@ -142,7 +142,7 @@ On 2026-10-15, with macOS 26.4.1, OpenSSH 10.2p1 (client) and OpenSSH 10.0p2 (Do
 - `make test-docker`: 98 tests passed, of which 16 cover temporary access and 5 CA recovery.
 - `make test-touchid`: 14/14 with real Touch ID, for the login key and for CA issuance under launchd. It ran before the final-review fixes and was not run again after them.
 
-Not checked by hand yet: using a grant while the screen is locked, sleep and wake past the deadline, and logout ending the grant job. A session with an actual AI agent is not part of the automated tests. See the [implementation record](docs/phase-2-implementation.md).
+Not checked by hand yet: using a grant while the screen is locked, sleep and wake past the deadline, and logout ending the grant job. A session with an actual AI agent is not part of the automated tests.
 
 ### For contributors
 
@@ -155,9 +155,4 @@ Not checked by hand yet: using a grant while the screen is locked, sleep and wak
 ### Documentation
 
 - [`docs/ai-agents.md`](docs/ai-agents.md): the AI workflow and the discovery block.
-- [`docs/phase-2-temporary-credentials.md`](docs/phase-2-temporary-credentials.md): the design, now marked implemented, with the JSON contract.
-- [`docs/phase-2-implementation.md`](docs/phase-2-implementation.md): what was built, how each gate was checked, and the pending manual checks.
-- [`docs/phase-2-validation.md`](docs/phase-2-validation.md) and `scripts/verify-temporary-access-design.py`: the protocol feasibility probe.
-- [`docs/windows-port.md`](docs/windows-port.md): research notes for a possible Windows version (not scheduled, nothing implemented).
-- [`PROMPT-PHASE-2.md`](PROMPT-PHASE-2.md): the handoff Phase 2 was built from.
 - README and `SECURITY.md` cover temporary access, the new files, the threat model and the limits. "Coming next" now lists possible temporary-access options: several grants at once, an absolute `--until`, per-server permissions, scoped port forwarding and jump hosts.

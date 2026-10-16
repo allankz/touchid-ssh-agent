@@ -10,8 +10,11 @@
 *.sock
 *.se
 
-# Private design notes.
+# Private notes and files for building the project with AI agents: plans,
+# design notes, handoffs, probes and the agents' own instructions.
 _docs/
+AGENTS.md
+CLAUDE.md
 
 # Never commit emergency kits, inventory backups or scratch folders.
 tmp/
