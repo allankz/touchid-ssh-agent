@@ -9,11 +9,12 @@ Thanks for your interest in improving touchid-ssh-agent. The project is small an
 
 These are the project's promises to its users. Changes that weaken any of them need an issue and an explicit discussion first.
 
-- **The private key never leaves the Secure Enclave.** No export, no backup, no copy in memory or on disk.
-- **Every signature needs Touch ID.** No reuse window, no silent mode, no "remember for N minutes", no password fallback.
-- **Small protocol surface.** The agent answers only "list identities" and "sign"; everything else gets `SSH_AGENT_FAILURE`.
+- **The private key never leaves the Secure Enclave.** Neither the login key nor the temporary-access CA: no export, no backup, no copy in memory or on disk.
+- **Every signature needs Touch ID.** Every login-key signature and every certificate from the CA. No reuse window, no silent mode, no "remember for N minutes", no password fallback.
+- **Temporary access is the one approved exception.** Phase 2 was approved to let a grant's own Ed25519 software key, generated in the grant job's memory and never written anywhere, sign SSH logins without further prompts after one Touch ID, for the selected servers only and until a deadline of at most 12 hours. It never applies to the login key or the CA. Longer grants, renewal, silent re-issuance or reuse windows for any other key need an issue and a discussion first.
+- **Small protocol surface.** The agents answer only "list identities" and "sign"; everything else gets `SSH_AGENT_FAILURE`. A grant's agent also signs only SSH logins for its accounts.
 - **The emergency kit stays off the Mac.** Only its public key is stored locally; the inventory backup is encrypted to it.
-- **No network calls, accounts or telemetry** from the agent. `authorize` and `audit` only talk to the servers the user names, through `ssh`.
+- **No network calls, accounts or telemetry** from the agent. `authorize`, `audit`, `access` and `recover` only talk to the servers the user names or the inventory lists, through `ssh`.
 - **Logs carry no secrets**: no key material, payloads, remote user names or hosts.
 - **Upgrades are additive.** A new version must keep working with the Touch ID key, emergency key, inventory and settings created by earlier versions, and must never require touching servers that were already authorized. File formats only gain optional fields; anything that needs user action is an explicit command the user chooses to run.
 - **Command line only.** There is no graphical app, and none is planned.
@@ -32,18 +33,19 @@ These are the project's promises to its users. Changes that weaken any of them n
 ```bash
 make build          # release build of the CLI
 make test           # wire format, protocol, Secure Enclave, agent, emergency kit, CLI flows
-make test-docker    # adds real SSH logins, authorize and audit against an sshd container
-make test-touchid   # interactive: approve, deny and time out real Touch ID prompts
+make test-docker    # adds real SSH logins, authorize, audit, temporary access and recovery against sshd containers
+make test-touchid   # interactive: approve, deny and time out real Touch ID prompts, login key and CA
 ```
 
 - XCTest does not ship with the Command Line Tools, so the suite is a plain executable in `Tests/SelfTest/` that uses OpenSSH (`ssh-keygen`, `ssh-add`, `ssh`) and `age` as oracles.
 - Keep the Mac **unlocked** while tests run: the Secure Enclave refuses operations while the screen is locked.
-- Tests create Secure Enclave keys **without** Touch ID through the `@_spi(Testing)` API, and only in temporary directories. Never point tests at `~/.touchid-ssh-agent`.
-- Run `make test-touchid` whenever you touch signing, the Touch ID prompt, the agent server or the LaunchAgent. No automated test can press the sensor.
+- Tests create Secure Enclave keys and CAs **without** Touch ID through the `@_spi(Testing)` API, and only in temporary directories. Never point tests at `~/.touchid-ssh-agent`.
+- Temporary-access tests use short directories under `/tmp`, because grant sockets must fit the 104-byte Unix socket limit. Their grant jobs run as detached processes (`TOUCHID_SSH_AGENT_ACCESS_LAUNCH=process`), except one test that runs a real per-grant launchd job. `swift run touchid-ssh-agent-selftest --docker --access-only` runs only the temporary-access and CA recovery Docker tests.
+- Run `make test-touchid` whenever you touch signing, the Touch ID prompt, the agent server, the CA, the grant job or the LaunchAgent. Its second part (with Docker) approves, denies and times out real CA issuance under launchd. No automated test can press the sensor.
 
 ## Project layout
 
-- `Sources/TouchIDSSHCore/`: SSH wire format, agent protocol, identity, signer, server, LaunchAgent, emergency kit, inventory and remote key management.
+- `Sources/TouchIDSSHCore/`: SSH wire format, agent protocol, identity, signer, server, LaunchAgent, emergency kit, inventory and remote key management; certificates, the CA, CA trust lines, the temporary agent, grant job, grant files and cleanup.
 - `Sources/touchid-ssh-agent/`: the CLI.
 - `Tests/SelfTest/`: the test suite.
 - `Tests/e2e/`: the `sshd` image used by the Docker tests.

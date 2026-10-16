@@ -209,8 +209,8 @@ func runAccessUnitTests() {
         let expected = CATrust.options(principal: "access-0123")
         check(expected == #"cert-authority,principals="access-0123",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc"#,
               "installed options: \(expected)")
-        let parsed = line(#"from="10.0.0.0/8,192.0.2.1",command="echo a, b",cert-authority"#)
-        check(parsed?.options == [AuthorizedKeysOption(name: "from", value: "10.0.0.0/8,192.0.2.1"),
+        let parsed = line(#"from="198.51.100.0/24,192.0.2.1",command="echo a, b",cert-authority"#)
+        check(parsed?.options == [AuthorizedKeysOption(name: "from", value: "198.51.100.0/24,192.0.2.1"),
                                   AuthorizedKeysOption(name: "command", value: "echo a, b"),
                                   AuthorizedKeysOption(name: "cert-authority")], "quoted commas and spaces: \(String(describing: parsed?.options))")
         check(parsed?.blob == caBlob, "key after the options")
