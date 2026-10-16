@@ -649,22 +649,21 @@ func staleList(_ inspections: [GrantInspection], excluding: String?, paths: Agen
 func accessStop(paths: AgentPaths, reporter: AccessReporter) throws {
     var stopped: [String] = []
     var problems: [[String: Any]] = []
+    // No lifecycle lock here, so stop can also withdraw a request that is
+    // still waiting for approval.
     for inspection in GrantStore.inspectAll(paths: paths) where inspection.problem == nil && inspection.running {
-        let directory = GrantDirectory(paths: paths, grantId: inspection.grantId)
         reporter.progress("Stopping grant \(inspection.grantId)...")
         if stopJob(inspection, paths: paths) {
             stopped.append(inspection.grantId)
         } else {
             problems.append(["grant_id": inspection.grantId, "reason": "the job did not stop"])
         }
-        _ = directory
     }
     // Leftovers of stopped grants, under the lifecycle lock.
     try paths.ensureAccessDirectories()
     if let lock = try? FileLock.acquire(paths.accessLockFile, timeout: 15) {
-        let sweep = sweepGrants(paths: paths, stopExpired: true)
+        _ = sweepGrants(paths: paths, stopExpired: true)
         FileLock.release(lock)
-        _ = sweep
     }
     guard problems.isEmpty else {
         throw AccessFailure("stop_failed", "could not stop \(problems.count) grant(s); try `\(tool) access cleanup`.",

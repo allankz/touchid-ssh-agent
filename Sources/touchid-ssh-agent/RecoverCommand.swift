@@ -126,9 +126,30 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
     if existing != nil { Out.say("  Touch ID key: \(identity.fingerprint)") }
     try ensureAgentRunning(paths: paths)
     try adoptBackupFolder(of: inventoryFile, paths: paths)
+    // Servers enrolled for temporary access trust the lost Mac's CA: this Mac's
+    // CA (created once, reused by a resumed run) replaces it on each of them.
+    let enrolled = old.servers.filter { $0.temporaryAccess != nil }
+    var caPlan: RecoveryCA?
+    if !enrolled.isEmpty {
+        let (ca, created) = try CertificateAuthorityStore.loadOrCreate(in: paths)
+        caPlan = RecoveryCA(paths: paths, created: created, ca: ca)
+        Out.say("  Temporary-access CA: \(ca.fingerprint)\(created ? " (created in the Secure Enclave)" : "")")
+        Out.say("  \(enrolled.count) server\(enrolled.count == 1 ? " trusts" : "s trust") the lost Mac's CA for temporary access.")
+    }
     Out.say("\n  Logging in with the emergency key only (nothing changes):")
     let reachable = emergencyLogins(old, agent: agent, configFile: options.configFile)
-    let unreachable = reachable.filter { !$0 }.count
+    let alreadyHere = try InventoryStore.load(from: paths).servers
+    func local(_ entry: InventoryEntry) -> InventoryEntry? { alreadyHere.first { $0.isSameServer(as: entry) } }
+    func caPending(_ entry: InventoryEntry) -> Bool {
+        entry.temporaryAccess != nil && !(caPlan?.isComplete(local(entry)) ?? false)
+    }
+    // A server whose keys already moved in an earlier run, but whose CA work is
+    // unfinished, is reached with this Mac's Touch ID key instead.
+    func finishWithTouchID(_ entry: InventoryEntry, accepted: Bool) -> Bool {
+        !accepted && caPending(entry) && local(entry)?.loginKeyFingerprint == identity.fingerprint
+    }
+    let workable = zip(old.servers, reachable).map { $1 || finishWithTouchID($0, accepted: $1) }
+    let unreachable = workable.filter { !$0 }.count
     guard unreachable < old.servers.count else {
         throw UsageError(description: "no server accepted this kit's key, so no server was changed.")
     }
@@ -183,43 +204,70 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
     For each server: add this Mac's keys, check the Touch ID login (one Touch ID),
     then remove the lost Mac's key\(rotating ? " and this kit's emergency key" : "").
     """)
-    let toMove = reachable.filter { $0 }.count
+    if !enrolled.isEmpty {
+        Out.say("""
+
+        On the \(enrolled.count) server\(enrolled.count == 1 ? "" : "s") with temporary access, this Mac's CA is added with the same
+        principal and restrictions, and a certificate login through it is checked (one more
+        Touch ID, once, for a validation certificate that grants nothing) before the lost
+        Mac's CA is removed. Old temporary grants and their aliases are not restored.
+        """)
+    }
+    let toMove = workable.filter { $0 }.count
     guard Terminal.confirm(word: "RECOVER", cancelWord: "ABORT",
                            prompt: "Type RECOVER to update \(toMove) server\(toMove == 1 ? "" : "s") (or ABORT): ") else {
         Out.say("Aborted. No server was changed.")
         return
     }
 
+    // Before any server changes: which old CA each enrolled server must lose.
+    try caPlan?.recordIntent(for: enrolled)
+
     var results: [(entry: InventoryEntry, ok: Bool, text: String)] = []
-    let alreadyHere = try InventoryStore.load(from: paths).servers
     for (entry, accepted) in zip(old.servers, reachable) {
         Out.say("\n\(entry.alias)  (\(entry.user)@\(entry.hostname):\(entry.port))")
-        // A previous run already moved this server: running again is safe.
-        if let moved = alreadyHere.first(where: {
-            $0.hostname == entry.hostname && $0.port == entry.port && $0.user == entry.user
-                && $0.loginKeyFingerprint == identity.fingerprint && $0.recoveryKeyFingerprint == newEmergency.fingerprint
-        }) {
+        // A previous run already moved this server: running again is safe. Its
+        // CA work must be finished too; matching login keys alone are not enough.
+        if let moved = local(entry), moved.loginKeyFingerprint == identity.fingerprint,
+           moved.recoveryKeyFingerprint == newEmergency.fingerprint, !caPending(entry) {
             Out.say("  ✓ already moved to this Mac by an earlier run; skipped")
             results.append((moved, true, "already moved"))
             continue
         }
-        guard accepted else {
+        let viaTouchID = finishWithTouchID(entry, accepted: accepted)
+        guard accepted || viaTouchID else {
             Out.say("  ✗ skipped: it did not accept this kit's key during the check")
             results.append((entry, false, "did not accept the emergency key"))
             continue
         }
-        let result = recoverServer(entry, configFile: options.configFile, agent: agent,
+        if caPending(entry), local(entry)?.loginKeyFingerprint == identity.fingerprint {
+            Out.say("  this Mac's keys are already there; finishing the CA replacement left by an earlier run")
+        }
+        let result = recoverServer(entry, configFile: options.configFile, agent: agent, viaTouchID: viaTouchID,
                                    oldEmergency: rotating ? loaded.fingerprint : nil,
-                                   identity: identity, newEmergency: newEmergency, paths: paths)
+                                   identity: identity, newEmergency: newEmergency,
+                                   caPlan: entry.temporaryAccess == nil ? nil : caPlan, paths: paths)
         Out.say("  \(result.ok ? "✓" : "✗") \(result.text)")
         results.append(result)
     }
+    caPlan?.stop()
     agent.stop()
 
-    var inventory = try InventoryStore.load(from: paths)
-    inventory.mac = IdentityStore.defaultComment()
-    for result in results where result.ok { inventory.upsert(result.entry) }
-    try InventoryStore.save(inventory, to: paths)
+    var inventory = try InventoryStore.update(paths) { inventory -> Inventory in
+        inventory.mac = IdentityStore.defaultComment()
+        for result in results where result.ok {
+            inventory.servers.removeAll { $0.isSameServer(as: result.entry) && $0.alias != result.entry.alias }
+            inventory.upsert(result.entry)
+        }
+        // Servers with unfinished CA work keep their pending record, with the reason.
+        for result in results where !result.ok && result.entry.temporaryAccess != nil {
+            for index in inventory.servers.indices where inventory.servers[index].isSameServer(as: result.entry) {
+                inventory.servers[index].lastAudit = .wholeSecondsNow
+                inventory.servers[index].lastAuditResult = result.entry.lastAuditResult
+            }
+        }
+        return inventory
+    }
     let failed = results.filter { !$0.ok }
     if failed.isEmpty {
         if rotating { preserveOldBackup(inventoryFile, paths: paths) }
@@ -238,21 +286,30 @@ func recover(_ arguments: ArraySlice<String>, paths: AgentPaths, dryRun: Bool) t
                                                                 configFile: entry.sshConfigFile)),
               let name = try offerSSHConfig(destination: entry.destination, suggestedName: entry.alias,
                                             resolved: resolved, configFile: options.configFile, paths: paths) else { continue }
-        inventory.servers.removeAll { $0.alias == entry.alias }
         recovered[index].alias = name
         recovered[index].destination = name
-        inventory.upsert(recovered[index])
+        let renamed = recovered[index]
+        inventory = try InventoryStore.update(paths) { inventory -> Inventory in
+            inventory.servers.removeAll { $0.alias == entry.alias }
+            inventory.upsert(renamed)
+            return inventory
+        }
     }
-    try InventoryStore.save(inventory, to: paths)
 
     // 6. Show the result.
     Out.section("6/\(steps) Audit")
     if recovered.isEmpty {
         Out.say("  Nothing to audit: no server was moved.")
     } else {
-        try runAudit(aliases: Set(recovered.map(\.alias)), paths: paths)
+        try runAudit(aliases: Set(recovered.map(\.alias)), paths: paths, exportBackup: failed.isEmpty)
     }
 
+    let pendingCA = failed.filter { $0.entry.temporaryAccess != nil }.map(\.entry.alias)
+    if !enrolled.isEmpty {
+        Out.say(pendingCA.isEmpty
+            ? "\nThe lost Mac's CA was removed from authorized_keys on every enrolled server. Trust set up elsewhere (for example TrustedUserCAKeys in sshd_config) is not checked."
+            : "\nCA replacement still pending on: \(pendingCA.joined(separator: ", ")). The lost Mac's CA stays trusted there until recover finishes them.")
+    }
     if failed.isEmpty {
         Out.say("""
 
@@ -279,6 +336,21 @@ func refuseKeysInUse(_ inventory: Inventory, identity: StoredIdentity?, paths: A
         this Mac's Touch ID key (\(identity.fingerprint)) is the one the inventory lists,
         so recovering would remove the key this Mac is using. If it stopped working
         (for example, fingerprints changed), move \(paths.displayPath(paths.directory)) aside and run recover again.
+        """)
+    }
+    // Recovering would also remove the temporary-access CA this Mac uses.
+    let recordedCAs = Set(inventory.servers.compactMap { $0.temporaryAccess?.caFingerprint })
+    if let ca = try? CertificateAuthorityStore.load(from: paths), recordedCAs.contains(ca.fingerprint) {
+        throw UsageError(description: """
+        this Mac's temporary-access CA (\(ca.fingerprint)) is the one the inventory lists, so
+        recovering would remove it from the servers. recover is for a new Mac.
+        """)
+    }
+    if !paths.isDefault, let main = try? CertificateAuthorityStore.load(from: AgentPaths(directory: AgentPaths.defaultDirectory)),
+       recordedCAs.contains(main.fingerprint) {
+        throw UsageError(description: """
+        this Mac's main temporary-access CA (\(main.fingerprint)) is the one the inventory lists.
+        recover is for a new Mac; run `\(tool) recovery test emergency-kit.txt` to rehearse.
         """)
     }
     // With another TOUCHID_SSH_AGENT_DIR, the Mac's main key would not be seen
@@ -314,10 +386,13 @@ func askReplaceEmergencyKey(_ key: RecoveryKey) throws -> Bool {
 }
 
 /// Moves one server to this Mac. The old keys are removed only after the new
-/// Touch ID key logged in, and only lines whose fingerprint is exactly the
-/// lost Mac's key (or the used emergency key) are touched.
-func recoverServer(_ entry: InventoryEntry, configFile: String?, agent: EmergencyAgent, oldEmergency: String?,
-                   identity: StoredIdentity, newEmergency: RecoveryKey,
+/// Touch ID key logged in (and, on a server enrolled for temporary access,
+/// after a certificate through this Mac's CA logged in too), and only lines
+/// whose key is exactly the lost Mac's key, its CA, or the used emergency key
+/// are touched. With `viaTouchID`, an earlier run already moved the keys and
+/// this one finishes the CA work through the new Touch ID key.
+func recoverServer(_ entry: InventoryEntry, configFile: String?, agent: EmergencyAgent, viaTouchID: Bool, oldEmergency: String?,
+                   identity: StoredIdentity, newEmergency: RecoveryKey, caPlan: RecoveryCA?,
                    paths: AgentPaths) -> (entry: InventoryEntry, ok: Bool, text: String) {
     var failedEntry = entry
     func fail(_ text: String) -> (entry: InventoryEntry, ok: Bool, text: String) {
@@ -336,34 +411,87 @@ func recoverServer(_ entry: InventoryEntry, configFile: String?, agent: Emergenc
         policy = .acceptNew(nil)
         Out.say("  ! no host key recorded for this server: trusting the one it presents now")
     }
+    func session(_ script: String) -> (ok: Bool, output: String, error: String) {
+        guard viaTouchID else { return RemoteKeys.emergencySession(target, agent: agent, knownHosts: policy, script: script) }
+        let result = RemoteKeys.runWithTouchIDKey(script, on: target, paths: paths, identity: identity, extraArguments: policy.arguments)
+        return (result.login == .ok, result.output, result.login == .ok ? "" : describe(result.login))
+    }
 
-    let newKeys = [AuthorizedKey.login(identity), AuthorizedKey.recovery(newEmergency)]
-    let added = RemoteKeys.emergencySession(target, agent: agent, knownHosts: policy,
-                                            script: RemoteKeys.installScript(newKeys) + RemoteKeys.listing)
-    guard added.ok else { return fail("the emergency key could not log in: \(added.error)") }
+    let rotation = caPlan?.rotation(for: entry)
+    var newKeys = [AuthorizedKey.login(identity), AuthorizedKey.recovery(newEmergency)]
+    if let caPlan, let rotation {
+        newKeys.append(AuthorizedKey(label: CATrust.label, type: SSHKeyFormat.keyType, blob: caPlan.ca.publicKeyBlob,
+                                     comment: caPlan.ca.comment, options: rotation.authorizedKeyOptions))
+    }
+    let added = session(RemoteKeys.installScript(newKeys) + RemoteKeys.listing)
+    guard added.ok else {
+        return fail("the \(viaTouchID ? "Touch ID key" : "emergency key") could not log in: \(added.error)")
+    }
     let report = RemoteKeys.parse(added.output)
     Out.say("  Touch ID key \(report["login"] == "added" ? "added" : "already there"), "
-        + "emergency key \(report["recovery"] == "added" ? "added" : "already there")")
+        + "emergency key \(report["recovery"] == "added" ? "added" : "already there")"
+        + (rotation == nil ? "" : ", this Mac's CA \(report[CATrust.label] == "added" ? "added" : "already there")"))
     if case .pinned = policy, let keys = entry.hostKeys { try? HostKeys.remember(keys, for: resolved) }
+    if let caPlan, let rotation {
+        caPlan.record(.replacementAdded, for: entry)
+        let scope = CATrust.inspect(RemoteKeys.listedLines(added.output), caBlob: caPlan.ca.publicKeyBlob, principal: rotation.principal)
+        guard scope.isScoped else {
+            return fail("this Mac's CA line is not scoped as expected (\(scope.summary)); the old keys and CA were kept")
+        }
+    }
 
     Out.say("  Checking the Touch ID login (approve the Touch ID prompt)...")
     let check = RemoteKeys.verifyLogin(on: target, paths: paths, identity: identity)
     guard check == .ok else { return fail("old keys kept, because the new Touch ID key did not log in: \(describe(check))") }
 
-    // Never remove this Mac's keys, whatever the fingerprints say.
-    let protected: Set<Data> = [identity.publicKeyBlob, newEmergency.blob]
+    if let caPlan, let rotation {
+        Out.say("  Checking a certificate login through this Mac's CA (no command runs)...")
+        let (credential, error) = caPlan.validationCredential()
+        guard let credential else { return fail("old keys and the lost Mac's CA kept: \(error ?? "no validation certificate")") }
+        let hostKeys = entry.hostKeys?.isEmpty == false ? (entry.hostKeys ?? []) : HostKeys.known(for: resolved)
+        if case .failed(let reason) = credential.check(hostname: entry.hostname, user: entry.user, port: entry.port,
+                                                       principal: rotation.principal, hostKeys: hostKeys) {
+            return fail("old keys and the lost Mac's CA kept, because a certificate through this Mac's CA did not log in: \(reason)")
+        }
+        caPlan.record(.replacementVerified, for: entry)
+    }
+
+    // Never remove this Mac's keys or CA, whatever the fingerprints say.
+    let protected: Set<Data> = Set([identity.publicKeyBlob, newEmergency.blob] + (caPlan.map { [$0.ca.publicKeyBlob] } ?? []))
     let retired = Set([entry.loginKeyFingerprint] + (oldEmergency.map { [$0] } ?? []))
     var seen = Set<Data>()
-    let doomed = RemoteKeys.listedLines(added.output)
-        .compactMap { RemoteKeys.keyBlob(inAuthorizedKeysLine: $0) }
+    let listedBlobs = RemoteKeys.listedLines(added.output).compactMap { RemoteKeys.keyBlob(inAuthorizedKeysLine: $0) }
+    var doomed = listedBlobs
         .filter { retired.contains(SSHKeyFormat.fingerprint(blob: $0)) && !protected.contains($0) && seen.insert($0).inserted }
+    if rotation != nil {
+        // Only the exact key the inventory recorded; a damaged record removes nothing.
+        guard let oldCA = rotation?.oldCABlob else {
+            return fail("the inventory's record of the lost Mac's CA does not match its fingerprint, so it was not removed; "
+                + "remove the cert-authority line with \(rotation?.oldCAFingerprint ?? "that fingerprint") by hand")
+        }
+        if !protected.contains(oldCA), listedBlobs.contains(oldCA), !doomed.contains(oldCA) { doomed.append(oldCA) }
+    }
+    var unmanaged = 0
     if !doomed.isEmpty {
-        let removed = RemoteKeys.emergencySession(target, agent: agent, knownHosts: policy, script: RemoteKeys.removeScript(doomed))
-        let remaining = RemoteKeys.listedLines(removed.output).compactMap { RemoteKeys.keyBlob(inAuthorizedKeysLine: $0) }
-        guard removed.ok, !remaining.contains(where: doomed.contains),
-              remaining.contains(identity.publicKeyBlob), remaining.contains(newEmergency.blob) else {
+        caPlan?.record(.retirementStarted, for: entry)
+        let removed = session(RemoteKeys.removeScript(doomed))
+        let remainingLines = RemoteKeys.listedLines(removed.output)
+        let remaining = remainingLines.compactMap { RemoteKeys.keyBlob(inAuthorizedKeysLine: $0) }
+        var removedOK = removed.ok && RemoteKeys.containsListing(removed.output) && !remaining.contains(where: doomed.contains)
+            && remaining.contains(identity.publicKeyBlob) && remaining.contains(newEmergency.blob)
+        if let caPlan, let rotation {
+            let after = CATrust.inspect(remainingLines, caBlob: caPlan.ca.publicKeyBlob, principal: rotation.principal,
+                                        retiredFingerprints: [rotation.oldCAFingerprint])
+            removedOK = removedOK && after.isScoped && after.retiredLines == 0
+            unmanaged = after.otherAuthorities
+        }
+        guard removedOK else {
             return fail("the new keys work, but the old keys could not be removed: \(removed.error)")
         }
+    } else if let caPlan, let rotation {
+        let report = CATrust.inspect(RemoteKeys.listedLines(added.output), caBlob: caPlan.ca.publicKeyBlob,
+                                     principal: rotation.principal, retiredFingerprints: [rotation.oldCAFingerprint])
+        unmanaged = report.otherAuthorities
     }
 
     var updated = entry
@@ -381,8 +509,27 @@ func recoverServer(_ entry: InventoryEntry, configFile: String?, agent: Emergenc
     if !trusted.isEmpty { updated.hostKeys = trusted }
     updated.lastAudit = .wholeSecondsNow
     updated.lastAuditResult = "recovered"
+    var caText = ""
+    if let caPlan, let rotation, var enrollment = entry.temporaryAccess {
+        enrollment.caPublicKey = caPlan.ca.authorizedKeyLine
+        enrollment.caFingerprint = caPlan.ca.fingerprint
+        enrollment.authorizedKeyOptions = rotation.authorizedKeyOptions
+        enrollment.enrolledAt = .wholeSecondsNow
+        enrollment.verified = true
+        enrollment.lastAudit = .wholeSecondsNow
+        enrollment.lastAuditResult = "recovered: this Mac's CA works; the lost Mac's CA \(rotation.oldCAFingerprint) was removed"
+        // Grants of the lost Mac are history; none is restored.
+        enrollment.lastGrant = nil
+        enrollment.caRotation = nil
+        enrollment.retiredCAFingerprint = rotation.oldCAFingerprint
+        updated.temporaryAccess = enrollment
+        caText = "; the lost Mac's CA replaced by this Mac's"
+        if unmanaged > 0 {
+            caText += " (\(unmanaged) other cert-authority line\(unmanaged == 1 ? "" : "s") there not managed by \(tool): check them)"
+        }
+    }
     let removedText = doomed.isEmpty ? "no old key was left to remove" : "removed \(doomed.count) old key\(doomed.count == 1 ? "" : "s")"
-    return (updated, true, "moved to this Mac; \(removedText)")
+    return (updated, true, "moved to this Mac; \(removedText)\(caText)")
 }
 
 /// Logs in to every server with the emergency key only, in order, and returns
@@ -398,9 +545,19 @@ func emergencyLogins(_ inventory: Inventory, agent: EmergencyAgent, configFile: 
         } else {
             policy = .acceptNew(agent.directory.appendingPathComponent("known_hosts-test"))
         }
-        let session = RemoteKeys.emergencySession(target, agent: agent, knownHosts: policy, script: nil)
+        // Enrolled servers also print authorized_keys (read only) to report the CA trust.
+        let session = RemoteKeys.emergencySession(target, agent: agent, knownHosts: policy,
+                                                  script: entry.temporaryAccess == nil ? nil : RemoteKeys.listing)
         Out.say("  \(session.ok ? "✓" : "✗") \(entry.alias)  (\(entry.user)@\(entry.hostname):\(entry.port))"
             + (session.ok ? "" : ": \(session.error)"))
+        if session.ok, let enrollment = entry.temporaryAccess {
+            if let blob = enrollment.caBlob {
+                let report = CATrust.inspect(RemoteKeys.listedLines(session.output), caBlob: blob, principal: enrollment.principal)
+                Out.say("      temporary access: \(report.summary) (CA \(enrollment.caFingerprint), principal \(enrollment.principal))")
+            } else {
+                Out.say("      temporary access: the inventory's CA key does not match its fingerprint")
+            }
+        }
         return session.ok
     }
 }

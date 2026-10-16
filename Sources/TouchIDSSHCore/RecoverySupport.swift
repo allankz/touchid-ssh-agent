@@ -70,7 +70,7 @@ public enum KnownHostsPolicy {
     /// or to the configured known_hosts when nil.
     case acceptNew(URL?)
 
-    var arguments: [String] {
+    public var arguments: [String] {
         switch self {
         case .pinned(let file):
             return ["-o", "UserKnownHostsFile=\(file.path)", "-o", "StrictHostKeyChecking=yes"]

@@ -962,6 +962,7 @@ if runDocker && accessOnly {
         check(build.status == 0, "docker build: \(build.stderr)")
     }
     runAccessDockerTests(docker: dockerPath, image: "touchid-ssh-agent-e2e:local")
+    runRecoveryCADockerTests(docker: dockerPath, image: "touchid-ssh-agent-e2e:local")
 }
 
 if runDocker && !accessOnly {
@@ -1621,6 +1622,7 @@ if runDocker && !accessOnly {
         check(try RecoveryStore.load(from: leaver.paths) != nil, "emergency key still configured")
     }
     runAccessDockerTests(docker: docker, image: image)
+    runRecoveryCADockerTests(docker: docker, image: image)
 } else if !runDocker {
     print("(real Docker login skipped; use --docker)")
 }

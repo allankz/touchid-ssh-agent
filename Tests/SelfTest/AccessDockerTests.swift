@@ -256,7 +256,8 @@ func runAccessDockerTests(docker: String, image: String) {
 
     var grant: [String: Any]?
     test("access: one approval for two targets, repeated commands through the returned argv, no fallback") {
-        let result = try e2e.cli(["access", "srv-a, srv-b", "--for", "3m", "--json"])
+        // "e2e-a" names srv-a again (its ssh alias): duplicates collapse to one target.
+        let result = try e2e.cli(["access", "srv-a, srv-b,e2e-a", "--for", "3m", "--json"])
         grant = e2e.json(result)
         check(result.status == 0 && grant?["ok"] as? Bool == true && grant?["status"] as? String == "active",
               "granted: \(result.stdout) \(result.stderr.suffix(800))")
@@ -349,6 +350,27 @@ func runAccessDockerTests(docker: String, image: String) {
                                                        "-R", "127.0.0.1:0:127.0.0.1:22"])
         check(forward.status != 0, "forwarding still denied")
         _ = try e2e.cli(["access", "stop", "--json"])
+    }
+
+    test("the readiness check is not satisfied by another key") {
+        // A config that logs in with the bootstrap key: authentication succeeds,
+        // but not with the certificate the check expects.
+        let other = e2e.work.appendingPathComponent("ssh_config_other")
+        try """
+        Host other
+          HostName 127.0.0.1
+          Port \(e2e.servers["a"]!.port)
+          User tester
+          IdentityFile \(e2e.bootstrap.path)
+          IdentitiesOnly yes
+          IdentityAgent none
+          BatchMode yes
+          ControlPath none
+          StrictHostKeyChecking no
+          UserKnownHostsFile \(e2e.knownHosts.path)
+        """.write(to: other, atomically: true, encoding: .utf8)
+        let outcome = CertificateLoginCheck.run(configFile: other, alias: "other", keyFingerprint: "SHA256:not-the-bootstrap-key")
+        check(outcome == .failed("authenticated with something other than the certificate"), "rejected: \(outcome)")
     }
 
     test("expiry: open sessions continue, new logins and held agent connections fail, files removed") {
@@ -502,7 +524,218 @@ func runAccessDockerTests(docker: String, image: String) {
         check(try e2e.entry("srv-c") == nil, "dropped from the inventory")
     }
 
+    test("a server that refuses certificates is recorded unverified, and access refuses it") {
+        try e2e.startServer("d", extra: "PubkeyAcceptedAlgorithms -ssh-ed25519-cert-v01@openssh.com")
+        let result = try e2e.cli(["authorize", "e2e-d", "-F", e2e.config.path, "--alias", "srv-d", "--temporary-access"])
+        check(result.status == 1 && result.stdout.contains("did not accept a certificate from this CA"),
+              "enrollment refused: \(result.stdout.suffix(500))")
+        check(try e2e.entry("srv-d")?.temporaryAccess?.verified == false, "recorded as not confirmed")
+        check(try e2e.entry("srv-d")?.loginKeyFingerprint == e2e.agent.identity.fingerprint, "the login keys are still recorded")
+        let refused = try e2e.cli(["access", "srv-d", "--for", "1m", "--json"])
+        check(e2e.errorCode(refused) == "not_enrolled", "access refuses it: \(refused.stdout)")
+    }
+
+    test("a replaced CA: authorize moves the server to the new CA and removes the old one") {
+        // As after changed fingerprints invalidated the CA and it was replaced.
+        let previous = e2e.ca
+        let principal = try e2e.entry("srv-b")?.temporaryAccess?.principal
+        try FileManager.default.removeItem(at: e2e.paths.caKeyFile)
+        try FileManager.default.removeItem(at: e2e.paths.caPublicKeyFile)
+        let replacement = try CertificateAuthorityStore.createWithoutUserPresenceForTesting(in: e2e.paths)
+        let mismatch = try e2e.cli(["access", "srv-b", "--for", "1m", "--json"])
+        check(e2e.errorCode(mismatch) == "ca_mismatch", "the old enrollment no longer matches: \(mismatch.stdout)")
+        let result = try e2e.cli(["authorize", "e2e-b", "-F", e2e.config.path, "--alias", "srv-b", "--temporary-access"])
+        check(result.status == 0 && result.stdout.contains("Removed the previous CA"), "rotated: \(result.stdout.suffix(600))")
+        let keys = try e2e.authorizedKeys("b")
+        check(!keys.contains(previous.publicKeyBlob.base64EncodedString()), "old CA line removed")
+        check(keys.components(separatedBy: replacement.publicKeyBlob.base64EncodedString()).count == 2, "one new CA line")
+        let enrollment = try e2e.entry("srv-b")?.temporaryAccess
+        check(enrollment?.caFingerprint == replacement.fingerprint && enrollment?.retiredCAFingerprint == previous.fingerprint
+              && enrollment?.caRotation == nil && enrollment?.principal == principal, "record moved to the new CA, same principal")
+        let granted = try e2e.cli(["access", "srv-b", "--for", "1m", "--json"])
+        check(granted.status == 0, "access works with the new CA: \(granted.stdout)")
+        _ = try e2e.cli(["access", "stop", "--json"])
+    }
+
     test("the personal ssh config is never changed") {
         check((try? Data(contentsOf: personalConfig)) == personalBefore, "~/.ssh/config unchanged")
+    }
+}
+
+/// Runs `recover` (or `recovery test`) through expect, answering the prompts.
+func recoverWithExpect(_ e2e: AccessE2E, _ command: String, kit: URL, inventory: URL, config: URL,
+                       paths: AgentPaths, extra: String = "") throws -> ShellResult {
+    try expectScript(#"""
+    set timeout 240
+    spawn $env(CLI) {*}$env(CMD) $env(KIT) --inventory $env(INV) -F $env(CFG) {*}$env(EXTRA)
+    expect {
+      "Type RECOVER" { send -- "RECOVER\r"; exp_continue }
+      "or Enter to skip" { send -- "\r"; exp_continue }
+      "Add it to" { send -- "n\r"; exp_continue }
+      "Add them?" { send -- "n\r"; exp_continue }
+      "Replace the emergency key" { puts "\nRESULT=asked-to-replace"; exit 5 }
+      "Retype the passphrase" { puts "\nRESULT=asked-for-new-kit"; exit 4 }
+      timeout { puts "\nRESULT=hung"; exit 3 }
+      eof
+    }
+    catch wait result
+    puts "\nEXIT=[lindex $result 3]"
+    """#, paths: paths, extra: ["CMD": command, "KIT": kit.path, "INV": inventory.path, "CFG": config.path, "EXTRA": extra,
+                                 AccessLauncher.modeVariable: "process"], in: e2e.work)
+}
+
+func runRecoveryCADockerTests(docker: String, image: String) {
+    print("Recovery of temporary-access CA trust (Docker)")
+    let old: AccessE2E
+    let newMac: LiveAgent
+    do {
+        old = try AccessE2E(docker: docker, image: image)
+        newMac = try LiveAgent.start(shortPath: true)
+    } catch {
+        test("recovery setup") { throw error }
+        return
+    }
+    defer {
+        _ = try? old.cli(["access", "stop", "--json"])
+        newMac.stop()
+        old.stop()
+    }
+    let cloud = old.work.appendingPathComponent("cloud")
+    let backup = cloud.appendingPathComponent(InventoryBackup.fileName)
+    let newConfig = old.work.appendingPathComponent("ssh_config_new")
+    let newKnownHosts = old.work.appendingPathComponent("known_hosts_new")
+    var newCA: StoredIdentity?
+    var oldGrant: [String: Any]?
+    let oldCA = old.ca.publicKeyBlob.base64EncodedString()
+    let oldLogin = old.agent.identity.publicKeyBlob.base64EncodedString()
+    let kitKey = (try? RecoveryKey(line: String(contentsOf: old.kit.publicKey, encoding: .utf8)))?.blob.base64EncodedString() ?? "?"
+    func newEnvironment(_ arguments: [String]) throws -> ShellResult {
+        try run(cliBinary, arguments, environment: [AgentPaths.environmentVariable: newMac.paths.directory.path,
+                                                    AccessLauncher.modeVariable: "process"])
+    }
+
+    test("recovery setup: the old Mac enrolls three servers and holds a live grant") {
+        for name in ["r1", "r2", "r3"] {
+            try old.startServer(name)
+            let result = try old.cli(["authorize", "e2e-\(name)", "-F", old.config.path, "--alias", "srv-\(name)", "--temporary-access"])
+            check(result.status == 0, "authorize \(name): \(result.stdout.suffix(300))")
+        }
+        // A duplicate of the old CA line, as a hand edit might leave.
+        let line = try old.authorizedKeys("r3").split(separator: "\n").first { $0.contains(oldCA) }.map(String.init) ?? ""
+        try old.onServer("r3", "printf '%s\\n' '\(line)' >> $HOME/.ssh/authorized_keys")
+        check(try old.authorizedKeys("r3").components(separatedBy: oldCA).count == 3, "two old CA lines on r3")
+        let granted = try old.cli(["access", "srv-r1,srv-r3", "--for", "10m", "--json"])
+        oldGrant = old.json(granted)
+        check(granted.status == 0, "old grant: \(granted.stdout) \(granted.stderr.suffix(400))")
+        for index in 0..<2 {
+            check(try old.ssh(old.argv(oldGrant, index), command: ["echo", "old-ok"]).stdout.contains("old-ok"),
+                  "the old certificate logs in before recovery")
+        }
+        try "Host *\n  UserKnownHostsFile \(newKnownHosts.path)\n  LogLevel ERROR\n".write(to: newConfig, atomically: true, encoding: .utf8)
+        newCA = try CertificateAuthorityStore.createWithoutUserPresenceForTesting(in: newMac.paths)
+        try SettingsStore.save(AgentSettings(backupPath: cloud.path), to: newMac.paths)
+        check(FileManager.default.fileExists(atPath: backup.path), "the old Mac's backup exists")
+    }
+
+    test("recovery test reports the recorded CA trust and changes nothing") {
+        let probe = try LiveAgent.start(shortPath: true)
+        defer { probe.stop() }
+        let before = try ["r1", "r2", "r3"].map { try old.authorizedKeys($0) }
+        let result = try recoverWithExpect(old, "recovery test", kit: old.kit.kit, inventory: backup, config: newConfig, paths: probe.paths)
+        check(result.stdout.contains("EXIT=0"), "dry run passed: \(result.stdout.suffix(500))")
+        check(result.stdout.components(separatedBy: "temporary access: CA trust scoped").count == 4, "CA trust reported for each server")
+        check(result.stdout.contains("2 duplicate CA lines"), "the duplicate is reported")
+        check(try ["r1", "r2", "r3"].map { try old.authorizedKeys($0) } == before, "authorized_keys unchanged")
+        check(!FileManager.default.fileExists(atPath: probe.paths.caKeyFile.path), "no CA created by recovery test")
+    }
+
+    test("recover: CA replaced where it verifies; a server refusing certificates keeps all old trust, pending") {
+        guard let newCA else { check(false, "no new CA"); return }
+        // r2 stops accepting certificates, so the new CA cannot be verified there.
+        let refuse = try run(docker, ["exec", old.servers["r2"]!.container, "sh", "-c",
+                                      "echo 'PubkeyAcceptedAlgorithms -ssh-ed25519-cert-v01@openssh.com' > /etc/ssh/sshd_config.d/zz-test.conf; kill -HUP 1"])
+        check(refuse.status == 0, "sshd reconfigured: \(refuse.stderr)")
+        usleep(800_000)
+        let backupBefore = try Data(contentsOf: backup)
+        let result = try recoverWithExpect(old, "recover", kit: old.kit.kit, inventory: backup, config: newConfig,
+                                           paths: newMac.paths, extra: "--keep-emergency-key")
+        let output = result.stdout
+        check(output.contains("EXIT=1"), "recover reports the pending server: \(output.suffix(900))")
+        check(output.contains("Temporary-access CA: \(newCA.fingerprint)") && output.contains("validation certificate"),
+              "explains the CA and the validation certificate")
+        check(output.contains("CA replacement still pending on: srv-r2"), "names the pending server")
+        check((try? Data(contentsOf: backup)) == backupBefore, "backup left as it was")
+        let newCABase64 = newCA.publicKeyBlob.base64EncodedString()
+        for name in ["r1", "r3"] {
+            let keys = try old.authorizedKeys(name)
+            check(!keys.contains(oldCA), "\(name): every old CA line removed")
+            check(!keys.contains(oldLogin), "\(name): the lost Mac's login key removed")
+            check(keys.contains(newCABase64) && keys.contains(newMac.identity.publicKeyBlob.base64EncodedString()) && keys.contains(kitKey),
+                  "\(name): new CA, new login key and the kept emergency key")
+        }
+        for index in 0..<2 {
+            let fresh = try old.ssh(old.argv(oldGrant, index), command: ["true"])
+            check(fresh.status != 0 && fresh.stderr.contains("Permission denied"),
+                  "the old, still-valid certificate fails fresh authentication after its CA was removed: \(fresh.stderr)")
+        }
+        let r2 = try old.authorizedKeys("r2")
+        check(r2.contains(oldCA) && r2.contains(oldLogin), "r2 keeps the old CA and the lost Mac's key")
+        let local = try InventoryStore.load(from: newMac.paths).servers
+        let pending = local.first { $0.alias == "srv-r2" }
+        check(pending?.temporaryAccess?.caRotation?.oldCAFingerprint == old.ca.fingerprint
+              && pending?.temporaryAccess?.caRotation?.newCAFingerprint == newCA.fingerprint, "r2's pending rotation is recorded")
+        let done = local.first { $0.alias == "srv-r1" }?.temporaryAccess
+        check(done?.caFingerprint == newCA.fingerprint && done?.caRotation == nil && done?.retiredCAFingerprint == old.ca.fingerprint
+              && done?.lastGrant == nil, "r1 recorded with the new CA, no grant restored")
+        check(((try? FileManager.default.contentsOfDirectory(atPath: newMac.paths.grantsDirectory.path)) ?? []).isEmpty,
+              "no grant directory on the new Mac")
+        let status = try newEnvironment(["status"])
+        check(status.stdout.contains("CA replacement: pending on srv-r2"), "status shows the pending replacement")
+
+        let granted = try newEnvironment(["access", "srv-r1", "--for", "1m", "--json"])
+        let document = old.json(granted)
+        check(granted.status == 0, "the new Mac grants access through its CA: \(granted.stdout) \(granted.stderr.suffix(300))")
+        check(try old.ssh(old.argv(document), command: ["echo", "new-ok"]).stdout.contains("new-ok"), "new certificate works")
+        _ = try newEnvironment(["access", "stop", "--json"])
+        let refused = try newEnvironment(["access", "srv-r2", "--for", "1m", "--json"])
+        check(old.errorCode(refused) == "rotation_pending", "a pending server cannot get a grant yet: \(refused.stdout)")
+    }
+
+    test("recover again: matching login keys never skip unfinished CA work") {
+        guard let newCA else { check(false, "no new CA"); return }
+        // r2 accepts certificates again. Simulate a run interrupted after its keys
+        // moved: the lost Mac's login key and the kit's key are gone, the old CA is
+        // still there, and the local record already lists this Mac's keys.
+        _ = try run(docker, ["exec", old.servers["r2"]!.container, "sh", "-c", "rm /etc/ssh/sshd_config.d/zz-test.conf; kill -HUP 1"])
+        usleep(800_000)
+        try old.onServer("r2", "f=$HOME/.ssh/authorized_keys; grep -vF '\(oldLogin)' $f | grep -vF '\(kitKey)' > $f.n; cat $f.n > $f; rm $f.n")
+        let kit = try RecoveryKey(line: String(contentsOf: old.kit.publicKey, encoding: .utf8))
+        try InventoryStore.update(newMac.paths) { inventory in
+            for index in inventory.servers.indices where inventory.servers[index].alias == "srv-r2" {
+                inventory.servers[index].loginKeyFingerprint = newMac.identity.fingerprint
+                inventory.servers[index].recoveryKeyFingerprint = kit.fingerprint
+                inventory.servers[index].temporaryAccess?.caRotation?.step = .retirementStarted
+            }
+        }
+        let result = try recoverWithExpect(old, "recover", kit: old.kit.kit, inventory: backup, config: newConfig,
+                                           paths: newMac.paths, extra: "--keep-emergency-key")
+        let output = result.stdout
+        check(output.contains("EXIT=0"), "recover finished: \(output.suffix(900))")
+        check(output.components(separatedBy: "already moved to this Mac by an earlier run; skipped").count == 3, "r1 and r3 skipped")
+        check(output.contains("finishing the CA replacement"), "r2 resumed instead of skipped")
+        let r2 = try old.authorizedKeys("r2")
+        check(!r2.contains(oldCA), "the old CA is gone from r2")
+        check(r2.contains(newCA.publicKeyBlob.base64EncodedString()) && r2.contains(kitKey), "new CA there; emergency key restored")
+        check(output.contains("CA trust scoped"), "the final audit checks the CA scope")
+        let local = try InventoryStore.load(from: newMac.paths).servers
+        check(local.count == 3 && local.allSatisfy {
+            $0.temporaryAccess?.caFingerprint == newCA.fingerprint && $0.temporaryAccess?.caRotation == nil
+                && $0.temporaryAccess?.retiredCAFingerprint == old.ca.fingerprint
+        }, "every server recorded with the new CA")
+        let decrypted = try run(agePath ?? "age", ["-d", "-i", old.kit.kit.path, backup.path])
+        check(decrypted.stdout.contains(newCA.fingerprint) && !decrypted.stdout.contains("caRotation"),
+              "the new backup holds the new CA trust")
+        let audited = try newEnvironment(["audit"])
+        check(audited.status == 0 && !audited.stdout.contains("retired CA is still trusted"), "audit passes: \(audited.stdout.suffix(400))")
     }
 }
