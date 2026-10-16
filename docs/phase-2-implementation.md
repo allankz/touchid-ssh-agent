@@ -1,6 +1,6 @@
 # Phase 2 implementation record
 
-> What was built for [temporary SSH access](phase-2-temporary-credentials.md), how each acceptance gate was checked, and what still needs a person at the Mac. Implemented on branch `codex/phase-2-temporary-access` from the handoff in [`PROMPT-PHASE-2.md`](../PROMPT-PHASE-2.md), on macOS 26.4.1 with OpenSSH 10.2p1 (client) and OpenSSH 10.0p2 (Docker servers). The version number stays 0.1.0.
+> What was built for [temporary SSH access](phase-2-temporary-credentials.md), how each acceptance gate was checked, and what still needs a person at the Mac. Implemented on branch `codex/phase-2-temporary-access` from the handoff in [`PROMPT-PHASE-2.md`](../PROMPT-PHASE-2.md), on macOS 26.4.1 with OpenSSH 10.2p1 (client) and OpenSSH 10.0p2 (Docker servers). It ships as version 0.2.0.
 
 ## What changed
 

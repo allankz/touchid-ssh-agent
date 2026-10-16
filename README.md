@@ -6,7 +6,7 @@
 
 An SSH agent for macOS that keeps the key in the **Secure Enclave** and requires **Touch ID for every signature**. The `ssh` client stays the same, and the server only needs the public key in `authorized_keys`.
 
-> Status: experimental (0.1.0). It does not replace an access recovery plan: always keep a second authorized key on the server (see [Recovery](#recovery)).
+> Status: experimental (0.2.0). It does not replace an access recovery plan: always keep a second authorized key on the server (see [Recovery](#recovery)).
 >
 > Temporary SSH access for AI agents (Phase 2) is implemented. Its biometric approval, launchd and sleep checks run in the interactive `make test-touchid`; see the [implementation record](docs/phase-2-implementation.md) for what has been validated.
 
