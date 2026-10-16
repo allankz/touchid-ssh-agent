@@ -16,7 +16,7 @@ Read the dedicated **Temporary access** section of `touchid-ssh-agent help`, the
    touchid-ssh-agent access app-server,worker-server --for 2h --json
    ```
 
-   The user approves through native Touch ID. Wait for the command result; an attempted request is not approval.
+   Add `--force-command COMMAND` for a single fixed task and `--allow-pty` only when a terminal is needed. The user approves through native Touch ID. Wait for the command result; an attempted request is not approval.
 4. Success includes `expires_at`, `remaining_seconds`, permissions, aliases such as `app-server-access-20261015-a1b2c3d4e5f6` and per-target `ssh_argv`. Append the remote command as an argv element and execute without a local shell. Keep the returned `-F` config path; the alias is defined in that grant's file, not the user's main SSH config. Use the original inventory destination when requesting another grant.
 5. A nonzero exit and `error.code` mean failure. Never infer approval from a file, socket, previous grant or progress text. `access_already_active` includes the current grant as `active_grant`; `access_busy` means another request is waiting for approval.
 6. On denial or timeout, report the outcome without repeatedly opening Touch ID. On expiry, explain that another approval is needed; do not silently extend access.
@@ -59,3 +59,5 @@ loop, fall back to other keys, or stop a grant you did not request.
 ## Acceptance
 
 An agent given only the discovery block and executable must discover the dedicated help section, request a two-target grant, use returned `-F` argv and dated aliases for repeated SSH commands, and handle missing enrollment, denial, expiry and stale cleanup without guessing paths, editing personal config or falling back to the main identity. Validate JSON stdout separately from human progress on stderr.
+
+The CLI side of this is covered by the Docker tests (JSON documents on stdout, error codes, returned argv, cleanup) and by `make test-touchid` (real approval, denial and timeout). A session with an actual AI agent is not part of the automated tests.

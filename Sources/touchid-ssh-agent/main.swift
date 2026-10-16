@@ -24,9 +24,11 @@ var usage: String {
                             so `access` can grant temporary logins to it.
         """),
         section("Day to day", """
-          status            Secure Enclave, Touch ID, keys, agent, backup and inventory.
+          status            Secure Enclave, Touch ID, keys, agent, backup, inventory and
+                            temporary access.
           inventory         Lists the servers in the inventory.
-          audit [NAME...]   Checks that every server still has both keys (one Touch ID each).
+          audit [NAME...]   Checks that every server still has both keys and, where enrolled,
+                            the CA's scope (one Touch ID each).
           deauthorize NAME... | --all [-F SSH_CONFIG] [-p PORT] [-- SSH_ARGS]
                             Removes this Mac's keys from servers and drops them from the
                             inventory. --all does every server, then offers to delete

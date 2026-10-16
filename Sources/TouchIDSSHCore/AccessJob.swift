@@ -375,7 +375,11 @@ public final class AccessJob {
             || error == .biometryNotEnrolled || error == .deviceLocked:
             return ("approval_unavailable", "Touch ID could not ask for approval: \(error.description)", "unavailable")
         case let error as SignError:
-            return ("ca_unusable", "The CA could not sign (changing fingerprints invalidates it): \(error.description)", "failed-start")
+            return ("ca_unusable", """
+            The CA could not sign: \(error.description). Adding or removing a fingerprint invalidates it. \
+            To replace it, move ca.se and ca.pub out of \(paths.displayPath(paths.directory)), then run \
+            `touchid-ssh-agent authorize HOST --temporary-access` for each enrolled server.
+            """, "failed-start")
         default:
             return ("internal_error", "\(error)", "failed-start")
         }
