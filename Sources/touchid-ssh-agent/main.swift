@@ -12,7 +12,7 @@ var usage: String {
     func section(_ title: String, _ lines: String) -> String { Out.bold(title) + "\n" + lines }
     return [
         "\(tool) \(version) — SSH agent with a Secure Enclave key and Touch ID for every signature",
-        "Usage: \(tool) COMMAND [OPTIONS]",
+        "Usage: \(tool) COMMAND [OPTIONS]\nAI agents: run `\(tool) instructions` first. It explains how to use this tool.",
         section("Getting started", """
           setup [--biometry current-set|any] [--comment TEXT]
                             Guided setup: Touch ID key, backup folder and emergency kit.
@@ -80,8 +80,10 @@ var usage: String {
         """
         Directory: \(AgentPaths.defaultDirectory.path) (or $\(AgentPaths.environmentVariable)).
         Time to approve Touch ID: 60 s (or $TOUCHID_SSH_AGENT_PROMPT_TIMEOUT).
-        AI agents: `\(tool) instructions --add-to ~/.claude/CLAUDE.md` (Claude Code) or
-        `~/.codex/AGENTS.md` (Codex) tells them about temporary access.
+        For AI agents: `\(tool) instructions` prints how to use temporary SSH access.
+        To make your agent read it, add a pointer to its instructions file once:
+            \(tool) instructions --add-to ~/.claude/CLAUDE.md   (Claude Code)
+            \(tool) instructions --add-to ~/.codex/AGENTS.md    (Codex)
         """,
     ].joined(separator: "\n\n")
 }

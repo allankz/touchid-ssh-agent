@@ -1,6 +1,6 @@
 # Instructions for AI agents: temporary SSH access
 
-> **Implemented.** `touchid-ssh-agent instructions` prints the same guidance for the installed version, and main help points to it. When the two differ, trust the installed instructions.
+> **There is a command for this:** `touchid-ssh-agent instructions` prints these instructions from the installed tool, for the version installed. Main help points agents to it, and `touchid-ssh-agent instructions --add-to FILE` adds a pointer to it to an agent's `CLAUDE.md` or `AGENTS.md`. When this page and the command differ, trust the command.
 
 ## Discovery
 

@@ -26,7 +26,8 @@ touchid-ssh-agent keeps the convenience of SSH keys and gets rid of the file:
 - **One-command recovery.** On a new Mac, `recover` uses the kit to open the inventory, installs the new Mac's keys on every server, removes the lost Mac's key (and its temporary-access CA), replaces the emergency key if you choose to, and finishes with an audit. `recovery test` rehearses it without changing anything.
 - **ssh config included.** `authorize` offers to add a `Host` block, with a short name of your choice, so `ssh NAME` goes through Touch ID; `audit` checks that it is still there.
 - **Audits.** `audit` checks that every server in the inventory still has both keys and, on servers enrolled for temporary access, that the CA line keeps its scope.
-- **Temporary SSH access for AI agents.** Approve selected servers for a limited time with one Touch ID, then let an agent make repeated SSH connections during the day or overnight: `access app-server,worker-server --for 2h`. Built-in instructions, a block you add to `CLAUDE.md` or `AGENTS.md` with one command, and JSON results tell agents how to request and use it. Your login key keeps asking for Touch ID every time. See [Temporary SSH access](#temporary-ssh-access).
+- **Temporary SSH access for AI agents.** Approve selected servers for a limited time with one Touch ID, then let an agent make repeated SSH connections during the day or overnight: `access app-server,worker-server --for 2h`. Your login key keeps asking for Touch ID every time. See [Temporary SSH access](#temporary-ssh-access).
+- **Instructions for AI agents, built in.** `touchid-ssh-agent instructions` prints, for the agent, how to use this tool: check, request and use temporary access, and what to do on denial or expiry. One command adds a pointer to it to your agent's `CLAUDE.md` or `AGENTS.md`. See [Instructions for AI agents](#instructions-for-ai-agents).
 - **Standard OpenSSH, nothing to install on servers.** It works with the `ssh` and `git` you already use; servers only need public keys in `authorized_keys`.
 - **No account, no service, no telemetry.** Everything runs on your Mac, and the code is open source.
 
@@ -297,6 +298,8 @@ That config offers only the grant's key and certificate, pins the host keys reco
 
 **When it ends.** At expiry, or after `access stop`, the job stops signing and removes its socket, key, certificate and config; old commands then fail instead of falling back to other keys, and servers reject the certificate after its expiry on their own. A crash, logout or reboot ends the grant too: nothing restarts it, and `access cleanup` (or the next request) removes what it left. **Expiry and stop block new logins only**: sessions and commands already running continue, and changes made on the servers stay.
 
+**For AI agents**, the same workflow is built into the tool: `touchid-ssh-agent instructions` (see [Instructions for AI agents](#instructions-for-ai-agents)).
+
 While a grant is active, the Mac does not idle-sleep (the screen still locks and the display still sleeps). Closing the lid, a forced sleep or a power loss still interrupt it, and the deadline keeps counting while the Mac sleeps.
 
 **If the CA stops working.** The CA uses the `current-set` policy, so adding or removing a fingerprint invalidates it, and `access` fails with `ca_unusable`. Move `ca.se` and `ca.pub` out of `~/.touchid-ssh-agent`, then run `authorize HOST --temporary-access` for each enrolled server: the first run creates a new CA, and each run installs it, checks it and removes the old one from that server.
@@ -311,16 +314,32 @@ An AI agent (or script) running on your Mac **can request** a signature through 
 - Agents running off the Mac (cloud, a container without the socket mounted, another machine) cannot reach the agent.
 - For unattended work, an agent can request [temporary access](#temporary-ssh-access) for named servers and a limited time; you approve it once with Touch ID.
 
-To tell your AI agent about it, add a short block to the instructions file it reads:
+The agent only accepts connections from your own user (UID checked on the socket). The socket has mode `0600`, inside a `0700` directory.
+
+### Instructions for AI agents
+
+The tool explains itself to AI agents. There is a command for that:
+
+```bash
+touchid-ssh-agent instructions
+```
+
+It prints, in Markdown, everything an agent needs to use temporary SSH access correctly: check `access status --json` first, request the fewest servers for the shortest time, wait for your Touch ID, run exactly the returned `ssh_argv`, and what to do on each error (never retry a denied prompt in a loop or fall back to other keys). It ships inside the installed binary and always describes that version: no repository, plugin or MCP service needed.
+
+| Command | For | What it does |
+| --- | --- | --- |
+| `instructions` | the agent | Prints the full workflow for the installed version. |
+| `instructions --snippet` | you | Prints a short block for `CLAUDE.md`, `AGENTS.md` or similar that tells the agent to run `instructions`. |
+| `instructions --add-to FILE` | you | Adds that block to `FILE`, or updates it, after showing it and asking. |
+
+So agents find it on their own, add the block once to the file your agent reads:
 
 ```bash
 touchid-ssh-agent instructions --add-to ~/.claude/CLAUDE.md    # Claude Code
 touchid-ssh-agent instructions --add-to ~/.codex/AGENTS.md     # Codex
 ```
 
-The command shows the block and asks before writing; running it again updates the same block instead of adding another. `instructions --snippet` prints the block to paste anywhere else (a project's `AGENTS.md`, another agent's settings). The block tells the agent to read `touchid-ssh-agent instructions`, the full workflow for the installed version, to check `access status --json` first, to request the fewest servers for the shortest time, and to use exactly the returned commands. See [docs/ai-agents.md](docs/ai-agents.md).
-
-The agent only accepts connections from your own user (UID checked on the socket). The socket has mode `0600`, inside a `0700` directory.
+Running it again updates the same block instead of adding another. For anything else (a project's `AGENTS.md`, another agent's settings), paste the output of `instructions --snippet`. Main help (`touchid-ssh-agent help`) also points agents to `instructions`. See [docs/ai-agents.md](docs/ai-agents.md) for the same workflow and the block.
 
 ## Known limitations
 
