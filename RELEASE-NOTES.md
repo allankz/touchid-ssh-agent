@@ -1,5 +1,79 @@
 # Release notes
 
+## 0.2.1 — 2026-10-21
+
+Tag `v0.2.1`. These notes compare 0.2.1 with the `v0.2.0` tag. The change was merged into `main` through [allankz/touchid-ssh-agent#2](https://github.com/allankz/touchid-ssh-agent/pull/2).
+
+Still experimental. Keep the emergency key installed on every server (`touchid-ssh-agent audit`).
+
+### Highlights
+
+- **Forget a server you can no longer reach.** `touchid-ssh-agent deauthorize --force app-server` drops it from the inventory and its encrypted backup without contacting it, so `audit`, `recovery test` and `recover` stop trying it. In 0.2.0, `deauthorize` had to log in to a server before it could leave the inventory, so a lost server stayed there for good.
+
+### Upgrading from 0.2.0
+
+```bash
+git pull
+make install
+launchctl kickstart -k gui/$(id -u)/local.touchid-ssh-agent
+touchid-ssh-agent version    # 0.2.1
+```
+
+Nothing else to do. Only the CLI changed: the agent, the CA, grants, the file formats and the keys on your servers are the same as in 0.2.0, and the upgrade changes nothing on any server.
+
+### New: `deauthorize --force`
+
+For a server this Mac can no longer log in to, because it was shut down or reinstalled, or because your access was revoked:
+
+```bash
+touchid-ssh-agent deauthorize --force app-server
+```
+
+- It contacts no server, so there is no ssh connection and no Touch ID prompt.
+- The name can be the inventory alias, the destination, `user@host` or the host name. A host name selects every account recorded on that host.
+- Before anything changes, it lists each matching entry with the keys the inventory recorded there (Touch ID key, emergency key and any temporary-access CA) and asks you to type `FORGET`. `ABORT` leaves the inventory as it was.
+- It then removes the entries and rewrites the encrypted backup. It also notes a Host block in your ssh config that still points to the server, and a live temporary grant that includes it; the grant keeps working until it ends or you run `access stop`.
+- The keys stay on the server, and your emergency kit still opens it while its key is there. The output prints the exact `deauthorize user@host [-p PORT]` that removes this Mac's keys once you can log in again.
+- It works even when this Mac no longer has a Touch ID key or an emergency key. Like the rest of `deauthorize`, it needs an interactive terminal.
+- It refuses `--all`, `-F`, `-p`, ssh options after `--`, and names that are not in the inventory.
+
+### Changes to existing commands
+
+- **`deauthorize`**: when it does not finish a server that is in the inventory (it could not log in, the server did not confirm the change, or you answered `SKIP`), it now points to `deauthorize --force NAME`. What it removes and how it asks are unchanged.
+- **`help`**: lists `deauthorize --force NAME...`.
+
+### Fixes
+
+No code fixes in this version. The documentation fixes are listed under Documentation.
+
+### Security
+
+- `deauthorize --force` changes no server. A server it forgets keeps trusting this Mac's Touch ID key, the emergency key and, if it was enrolled, the temporary-access CA, until those lines are removed from its `authorized_keys`. The confirmation lists their fingerprints so you can find them. `access` no longer issues certificates for it, because the server is no longer in the inventory.
+- No new network calls: `deauthorize` still talks only to the servers you name, and `--force` talks to none.
+
+### Validation
+
+On 2026-10-21, with macOS 26.4.1, OpenSSH 10.2p1 (client) and OpenSSH 10.0p2 (Docker servers):
+
+- `make test`: 58 tests passed (57 in 0.2.0, plus one for `deauthorize --force`).
+- `make test-docker`: 99 tests passed (98 in 0.2.0, plus the same new test).
+- `make test-touchid`: not run. This version does not change signing, the Touch ID prompt, the agent server, the CA, the grant job or the LaunchAgent.
+
+Not checked by hand: `deauthorize --force` with a server that was really lost. The test uses an inventory entry for a documentation address (`203.0.113.7`) and, for the plain `deauthorize`, a closed port on `127.0.0.1`. The manual checks left open by 0.2.0 are still open: using a grant while the screen is locked, sleep and wake past the deadline, and logout ending the grant job.
+
+### For contributors
+
+- The `deauthorize --force` test runs in `make test` and needs no Docker: nothing is contacted, and the plain `deauthorize` failure it checks comes from a closed local port.
+- The project layout in `CONTRIBUTING.md` lists only what is in the repository: `scripts/` holds the interactive Touch ID test, and `docs/` the guide for AI agents and the README images.
+- `.gitignore` also excludes `AGENTS.md` and `CLAUDE.md`, the local instructions for coding agents, next to the private `_docs/` folder.
+
+### Documentation
+
+- README: the commands table and the `deauthorize` section describe `--force`, and the status line names 0.2.1.
+- `SECURITY.md`: the `deauthorize` entry covers `--force` and what it leaves on the server.
+- `RELEASE-NOTES.md` is new since the `v0.2.0` tag. It holds the 0.2.0 notes, written after that tag, and these.
+- The README and `CONTRIBUTING.md` no longer link to design notes, an implementation record and a handoff that were never in the repository. The README status line points to the release notes instead.
+
 ## 0.2.0 — 2026-10-15
 
 Tag `v0.2.0`, merged into `main` on 2026-10-16 through [allankz/touchid-ssh-agent#1](https://github.com/allankz/touchid-ssh-agent/pull/1).

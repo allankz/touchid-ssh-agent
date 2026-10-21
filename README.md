@@ -6,9 +6,9 @@
 
 An SSH agent for macOS that keeps the key in the **Secure Enclave** and requires **Touch ID for every signature**. The `ssh` client stays the same, and the server only needs the public key in `authorized_keys`.
 
-> Status: experimental (0.2.0). It does not replace an access recovery plan: always keep a second authorized key on the server (see [Recovery](#recovery)).
+> Status: experimental (0.2.1). It does not replace an access recovery plan: always keep a second authorized key on the server (see [Recovery](#recovery)).
 >
-> 0.2.0 adds temporary SSH access for AI agents. Its real Touch ID approval under launchd passed the interactive `make test-touchid`; locked-screen, sleep/wake and logout behavior still need a manual check. See the [release notes](RELEASE-NOTES.md).
+> 0.2.1 adds `deauthorize --force`, which drops a server you can no longer reach from the inventory. 0.2.0 added temporary SSH access for AI agents: its real Touch ID approval under launchd passed the interactive `make test-touchid`; locked-screen, sleep/wake and logout behavior still need a manual check. See the [release notes](RELEASE-NOTES.md).
 
 ## What problem does it solve?
 
