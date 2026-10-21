@@ -11,10 +11,15 @@ struct DeauthorizeTarget {
 
 /// `deauthorize NAME... | --all`: removes this Mac's Touch ID key and emergency
 /// key from servers, matched exactly by key, and drops them from the inventory.
+/// `--force NAME...` only drops them, for servers this Mac can no longer reach.
 func deauthorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
-    let usageText = "usage: \(tool) deauthorize NAME... | --all [-F SSH_CONFIG] [-p PORT] [-- SSH_ARGS]"
+    let usageText = """
+    usage: \(tool) deauthorize NAME... | --all [-F SSH_CONFIG] [-p PORT] [-- SSH_ARGS]
+           \(tool) deauthorize --force NAME...
+    """
     var names: [String] = []
     var all = false
+    var force = false
     var configFile: String?
     var port: Int?
     var extra: [String] = []
@@ -23,6 +28,8 @@ func deauthorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
         switch argument {
         case "--all":
             all = true
+        case "--force":
+            force = true
         case "-F":
             guard let value = iterator.next() else { throw UsageError(description: usageText) }
             configFile = (value as NSString).expandingTildeInPath
@@ -37,6 +44,16 @@ func deauthorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
         }
     }
     guard all ? names.isEmpty : !names.isEmpty else { throw UsageError(description: usageText) }
+    if force {
+        guard !all else {
+            throw UsageError(description: "--force forgets only the servers you name; it does not take --all.\n\(usageText)")
+        }
+        guard configFile == nil, port == nil, extra.isEmpty else {
+            throw UsageError(description: "--force contacts no server, so -F, -p and ssh options do not apply.\n\(usageText)")
+        }
+        // Before loading the keys: an entry is forgotten even when this Mac has none left.
+        return try forget(names, paths: paths)
+    }
     try Terminal.requireInteractive("deauthorize")
 
     let identity = try IdentityStore.load(from: paths)
@@ -141,8 +158,80 @@ func deauthorize(_ arguments: ArraySlice<String>, paths: AgentPaths) throws {
 
         \(failed.count) server\(failed.count == 1 ? " was" : "s were") left as \(failed.count == 1 ? "it was" : "they were"): \(failed.joined(separator: ", ")).
         """)
+        if targets.contains(where: { $0.entry != nil && failed.contains($0.label) }) {
+            Out.say("If you can no longer log in to one of them, `\(tool) deauthorize --force NAME` drops it from the inventory without contacting it.")
+        }
         exit(1)
     }
+}
+
+/// `deauthorize --force NAME...`: drops every inventory entry that names a
+/// server, and updates the backup, without contacting the server. Its keys stay
+/// there, so the summary lists them for when access comes back.
+private func forget(_ names: [String], paths: AgentPaths) throws {
+    let inventory = try InventoryStore.load(from: paths)
+    var entries: [InventoryEntry] = []
+    for name in names {
+        // Every account on a host typed by its name: all of them point to the lost server.
+        let found = inventory.servers.filter {
+            $0.alias == name || $0.destination == name || $0.hostname == name || "\($0.user)@\($0.hostname)" == name
+        }
+        guard !found.isEmpty else {
+            throw UsageError(description: "\(name) is not in the inventory, so there is nothing to forget. `\(tool) inventory` lists the servers.")
+        }
+        entries += found.filter { entry in !entries.contains { $0.alias == entry.alias } }
+    }
+    try Terminal.requireInteractive("deauthorize")
+
+    Out.header("deauthorize", "forget servers this Mac can no longer reach")
+    Out.say("""
+    This drops these servers from the inventory and its encrypted backup without
+    contacting them. Nothing changes on the servers: the keys listed below stay in
+    their authorized_keys, and the emergency kit still opens them while its key is
+    there. Use it only for a server you can no longer log in to.
+    """)
+    Out.section("Servers")
+    for entry in entries {
+        Out.say("  • \(entry.alias)  (\(entry.user)@\(entry.hostname):\(entry.port))")
+        Out.say("      Touch ID key    \(entry.loginKeyFingerprint)")
+        Out.say("      Emergency key   \(entry.recoveryKeyFingerprint)")
+        for ca in entry.temporaryAccess?.recordedCAs ?? [] { Out.say("      Temporary CA    \(ca.fingerprint)") }
+    }
+    guard Terminal.confirm(word: "FORGET", cancelWord: "ABORT",
+                           prompt: "Type FORGET to drop \(entries.count) server\(entries.count == 1 ? "" : "s") from the inventory without touching \(entries.count == 1 ? "it" : "them") (or ABORT): ") else {
+        Out.say("Aborted. The inventory was not changed.")
+        return
+    }
+
+    let left = try InventoryStore.update(paths) { current -> Int in
+        current.servers.removeAll { entry in entries.contains { $0.alias == entry.alias } }
+        return current.servers.count
+    }
+    Out.say("")
+    Out.say("Inventory: \(entries.count) server\(entries.count == 1 ? "" : "s") removed, \(left) left.")
+    reportBackup(InventoryBackup.export(paths: paths, allowEmpty: left == 0), paths: paths)
+    for entry in entries {
+        // The grant's targets are frozen in its own files, so it keeps working until it ends.
+        if let grant = entry.temporaryAccess?.lastGrant, grant.endedAt == nil, grant.expiresAt > Date() {
+            Out.say("! \(entry.alias) is in a temporary grant valid until \(localTime(grant.expiresAt)); `\(tool) access stop` ends it now.")
+        }
+        if sshConfigStatus(for: entry, paths: paths).ok {
+            Out.say("! ssh config: a Host block for \(entry.alias) still points to the Touch ID agent. Remove it if you no longer use it.")
+        }
+    }
+    let one = entries.count == 1
+    Out.say("""
+
+    The keys above are still on \(one ? "that server" : "those servers"). If you get access back,
+    this takes this Mac's keys off \(one ? "it" : "them"):
+    """)
+    for entry in entries {
+        Out.say("    \(tool) deauthorize \(entry.user)@\(entry.hostname)" + (entry.port == 22 ? "" : " -p \(entry.port)"))
+    }
+    Out.say("""
+    From a server's console, `ssh-keygen -lf ~/.ssh/authorized_keys` shows the
+    fingerprint of each line, to remove them by hand.
+    """)
 }
 
 /// A lost Mac's CA still waiting for removal on this server (an unfinished

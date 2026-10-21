@@ -4,7 +4,7 @@ import Foundation
 import LocalAuthentication
 import TouchIDSSHCore
 
-let version = "0.2.0"
+let version = "0.2.1-dev"
 let tool = "touchid-ssh-agent"
 
 /// The help text, grouped by what the user is doing.
@@ -33,6 +33,9 @@ var usage: String {
                             Removes this Mac's keys from servers and drops them from the
                             inventory. --all does every server, then offers to delete
                             this Mac's Touch ID key.
+          deauthorize --force NAME...
+                            For a server you can no longer reach: drops it from the
+                            inventory without contacting it. Its keys stay on it.
           config NAME --host HOST [--user USER] [--port PORT]
                             Prints a ~/.ssh/config block. Changes no file.
           set backup-path DIR|none

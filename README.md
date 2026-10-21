@@ -208,6 +208,7 @@ Then remove the lost Mac's login key from each server (`ssh-keygen -lf ~/.ssh/au
 | `status` | Secure Enclave, Touch ID (including password lockout), identity, agent, LaunchAgent, emergency key, backup folder, inventory, FileVault, and the temporary-access CA, pending CA replacements and active grant. |
 | `inventory` / `audit [NAME...]` | Lists the servers (with their temporary-access enrollment and latest grant) / checks both keys, the CA's scope and the ssh config of each server. |
 | `deauthorize NAME... \| --all [-F FILE] [-p P] [-- SSH_ARGS]` | Removes this Mac's keys and CA trust line from servers and drops them from the inventory. `--all` does every server, then offers to delete the Touch ID key. |
+| `deauthorize --force NAME...` | Since 0.2.1. For a server you can no longer reach: drops it from the inventory and its backup without contacting it. Its keys stay on the server. |
 | `config ALIAS --host H [--user U] [--port P]` | Prints the `ssh_config` block. |
 | `set backup-path DIR\|none` | Sets or clears the backup folder for `inventory.age`. |
 
@@ -243,6 +244,8 @@ Then remove the lost Mac's login key from each server (`ssh-keygen -lf ~/.ssh/au
 | `uninstall` | Removes the LaunchAgent. The keys are kept. |
 
 `deauthorize` reaches each server with your usual ssh access (one Touch ID when that goes through this agent; pass `-- -i OTHER_KEY` to use another key). It removes only the lines holding this Mac's Touch ID key, emergency key and temporary-access CA (and a lost Mac's CA still waiting for removal there), matched exactly, and leaves every other line alone. If no other key would be left on the server, it stops and asks first, because afterwards only a password or your provider's console would get you in. The old `delete` command now points to `deauthorize --all`.
+
+Since 0.2.1, `deauthorize --force NAME...` is for a server you can no longer log in to. It contacts nothing: it lists the keys the inventory recorded there and, after you type `FORGET`, drops every inventory entry that names the server (by alias, destination, `user@host` or host name) and updates the backup. Those keys stay on the server, and your emergency kit still opens it, until they are removed; once you can log in again, `deauthorize user@host` removes them.
 
 By default everything lives in `~/.touchid-ssh-agent/`. Set `TOUCHID_SSH_AGENT_DIR` to use another directory (keep it short: grant sockets live four levels below it and Unix socket paths are limited to 104 bytes). Touch ID must be approved within 60 s; to change that, set `TOUCHID_SSH_AGENT_PROMPT_TIMEOUT` (in seconds) in the agent's environment, or in the shell that runs `access`, `authorize` or `recover` for the CA's prompts.
 
