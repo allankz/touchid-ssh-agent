@@ -671,6 +671,92 @@ test("help is grouped by task, delete points to deauthorize, migrate warns and l
     check(try Data(contentsOf: paths.inventoryFile) == before, "migrate changed nothing")
 }
 
+test("deauthorize --force: forgets every entry for a lost server after FORGET, updates the backup, contacts nothing") {
+    guard let age = agePath else {
+        print("    (skipped: age is not installed)")
+        return
+    }
+    let directory = try makeTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let paths = AgentPaths(directory: directory.appendingPathComponent("a"))
+    let environment = [AgentPaths.environmentVariable: paths.directory.path]
+    // No Touch ID key: a server is forgotten even when this Mac has none left.
+    let kit = try plainKit(in: directory, name: "kit")
+    let emergency = try RecoveryStore.importPublicKey(from: kit.publicKey, into: paths, replace: false)
+    let cloud = directory.appendingPathComponent("cloud")
+    try FileManager.default.createDirectory(at: cloud, withIntermediateDirectories: false)
+    try SettingsStore.save(AgentSettings(backupPath: cloud.path), to: paths)
+    let sshConfig = directory.appendingPathComponent("ssh_config")
+    try "".write(to: sshConfig, atomically: true, encoding: .utf8)
+    var inventory = Inventory(mac: "this mac")
+    // refused: a closed local port, so the plain deauthorize fails at once.
+    for (alias, user, host, port) in [("lost", "deploy", "203.0.113.7", 22), ("lost-root", "root", "203.0.113.7", 22),
+                                      ("web", "deploy", "server.example", 22), ("refused", "deploy", "127.0.0.1", 1)] {
+        inventory.upsert(InventoryEntry(alias: alias, destination: alias == "refused" ? host : alias, hostname: host, user: user, port: port,
+                                        sshConfigFile: sshConfig.path, loginKeyFingerprint: "SHA256:recorded-login",
+                                        recoveryKeyFingerprint: emergency.fingerprint, authorizedAt: .wholeSecondsNow))
+    }
+    try InventoryStore.save(inventory, to: paths)
+    check(InventoryBackup.export(paths: paths).isWritten, "backup written")
+    func aliases() throws -> [String] { try InventoryStore.load(from: paths).servers.map(\.alias) }
+    func backupAliases() throws -> [String] {
+        let decrypted = try run(age, ["-d", "-i", kit.kit.path, cloud.appendingPathComponent(InventoryBackup.fileName).path])
+        return (try? Inventory.decode(Data(decrypted.stdout.utf8)))?.servers.map(\.alias) ?? []
+    }
+    func forget(_ answer: String) throws -> ShellResult {
+        try expectScript(#"""
+        spawn $env(CLI) deauthorize --force 203.0.113.7
+        expect {
+          "Type FORGET" { send -- "$env(ANSWER)\r"; exp_continue }
+          timeout { puts "\nRESULT=hung"; exit 3 }
+          eof
+        }
+        catch wait result
+        puts "\nEXIT=[lindex $result 3]"
+        """#, paths: paths, extra: ["ANSWER": answer], in: directory)
+    }
+
+    let plain = try expectScript(#"""
+    spawn $env(CLI) deauthorize refused
+    expect {
+      "to take this Mac" { send -- "REMOVE\r"; exp_continue }
+      timeout { puts "\nRESULT=hung"; exit 3 }
+      eof
+    }
+    catch wait result
+    puts "\nEXIT=[lindex $result 3]"
+    """#, paths: paths, in: directory)
+    check(plain.stdout.contains("could not log in") && plain.stdout.contains("EXIT=1"), "plain deauthorize fails: \(plain.stdout.suffix(400))")
+    check(plain.stdout.contains("deauthorize --force NAME"), "the failure points to --force")
+
+    let all = try run(cliBinary, ["deauthorize", "--force", "--all"], environment: environment)
+    check(all.status != 0 && all.stderr.contains("does not take --all"), "refuses --all: \(all.stderr)")
+    let port = try run(cliBinary, ["deauthorize", "--force", "-p", "2222", "lost"], environment: environment)
+    check(port.status != 0 && port.stderr.contains("contacts no server"), "refuses ssh options: \(port.stderr)")
+    let unknown = try run(cliBinary, ["deauthorize", "--force", "nowhere"], environment: environment)
+    check(unknown.status != 0 && unknown.stderr.contains("nowhere is not in the inventory"), "unknown name: \(unknown.stderr)")
+    let piped = try run(cliBinary, ["deauthorize", "--force", "lost"], environment: environment)
+    check(piped.status != 0 && piped.stderr.contains("interactive terminal"), "needs a terminal: \(piped.stderr)")
+    check(try aliases() == ["lost", "lost-root", "web", "refused"], "nothing forgotten by the refused runs")
+
+    let aborted = try forget("ABORT")
+    check(aborted.stdout.contains("Aborted. The inventory was not changed.") && aborted.stdout.contains("EXIT=0"),
+          "abort: \(aborted.stdout.suffix(400))")
+    check(try aliases() == ["lost", "lost-root", "web", "refused"], "inventory kept after ABORT")
+
+    let forgotten = try forget("FORGET")
+    check(forgotten.stdout.contains("EXIT=0"), "forgot: \(forgotten.stdout.suffix(600))")
+    check(forgotten.stdout.contains("SHA256:recorded-login") && forgotten.stdout.contains(emergency.fingerprint),
+          "lists the keys left on the server")
+    check(forgotten.stdout.contains("2 servers removed, 2 left"), "both accounts on the lost host removed")
+    check(forgotten.stdout.contains("deauthorize deploy@203.0.113.7") && forgotten.stdout.contains("deauthorize root@203.0.113.7"),
+          "says how to remove the keys once access is back")
+    check(!forgotten.stdout.contains("could not log in"), "no server contacted")
+    check(try aliases() == ["web", "refused"], "only the other servers left in the inventory")
+    check(try backupAliases() == ["web", "refused"], "the backup lists only the other servers")
+    check(try RecoveryStore.load(from: paths) == emergency, "emergency key still configured")
+}
+
 test("recover refuses another directory on a Mac whose main key is in the inventory") {
     let mainPaths = AgentPaths(directory: AgentPaths.defaultDirectory)
     guard let main = try? IdentityStore.load(from: mainPaths) else {
